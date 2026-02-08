@@ -2,16 +2,17 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <crypto/mldsa.h>
 #include <key.h>
 #include <key_io.h>
 #include <node/context.h>
 #include <script/script.h>
-#include <script/solver.h>
 #include <script/signingprovider.h>
+#include <script/solver.h>
 #include <test/util/setup_common.h>
+#include <wallet/test/util.h>
 #include <wallet/types.h>
 #include <wallet/wallet.h>
-#include <wallet/test/util.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -252,6 +253,14 @@ BOOST_AUTO_TEST_CASE(ismine_standard)
         result = spk_manager->IsMine(scriptPubKey);
         BOOST_CHECK(result);
 
+        // Test P2TSH (combo descriptor does not describe P2TSH)
+        const std::vector<unsigned char> mldsa_pubkey(mldsa::MLDSA87_PUBLICKEY_SIZE, 0x01);
+        const CScript p2tsh_leaf = CScript() << mldsa_pubkey << OP_CHECKSIG;
+        const uint256 p2tsh_merkle_root = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, p2tsh_leaf);
+        scriptPubKey = GetScriptForDestination(WitnessV2Taproot{p2tsh_merkle_root});
+        result = spk_manager->IsMine(scriptPubKey);
+        BOOST_CHECK(!result);
+
         // Test P2TR (combo descriptor does not describe P2TR)
         XOnlyPubKey xpk(pubkeys[0]);
         Assert(xpk.IsFullyValid());
@@ -277,6 +286,26 @@ BOOST_AUTO_TEST_CASE(ismine_standard)
         builder.Finalize(xpk);
         WitnessV1Taproot output = builder.GetOutput();
         scriptPubKey = GetScriptForDestination(output);
+        result = spk_manager->IsMine(scriptPubKey);
+        BOOST_CHECK(result);
+    }
+
+    // P2TSH - Wallet descriptor manager
+    {
+        CWallet keystore(chain.get(), "", CreateMockableWalletDatabase());
+        DescriptorScriptPubKeyMan* spk_manager;
+
+        {
+            LOCK(keystore.cs_wallet);
+            keystore.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            keystore.SetupDescriptorScriptPubKeyMans();
+            spk_manager = dynamic_cast<DescriptorScriptPubKeyMan*>(keystore.GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/false));
+            BOOST_REQUIRE(spk_manager);
+        }
+
+        const auto dest = keystore.GetNewDestination(OutputType::P2TSH, "");
+        BOOST_REQUIRE(dest);
+        scriptPubKey = GetScriptForDestination(*dest);
         result = spk_manager->IsMine(scriptPubKey);
         BOOST_CHECK(result);
     }

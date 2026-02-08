@@ -2,24 +2,20 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <wallet/wallet.h>
-
-#include <cstdint>
-#include <future>
-#include <memory>
-#include <vector>
-
 #include <addresstype.h>
 #include <interfaces/chain.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
 #include <node/types.h>
 #include <policy/policy.h>
+#include <psbt.h>
 #include <rpc/server.h>
+#include <script/interpreter.h>
 #include <script/solver.h>
 #include <test/util/logging.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <univalue.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -29,9 +25,16 @@
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
+#include <wallet/wallet.h>
 
 #include <boost/test/unit_test.hpp>
-#include <univalue.h>
+
+#include <cstdint>
+#include <future>
+#include <memory>
+#include <regex>
+#include <set>
+#include <vector>
 
 using node::MAX_BLOCKFILE_SIZE;
 
@@ -68,6 +71,20 @@ static void AddKey(CWallet& wallet, const CKey& key)
     auto& desc = descs.at(0);
     WalletDescriptor w_desc(std::move(desc), 0, 0, 1, 1);
     Assert(wallet.AddWalletDescriptor(w_desc, provider, "", false));
+}
+
+static CExtKey ExtractMasterExtKeyFromDescriptor(const std::string& descriptor)
+{
+    static const std::regex re{R"(([tx]prv[1-9A-HJ-NP-Za-km-z]+))"};
+    std::smatch match;
+    if (!std::regex_search(descriptor, match, re) || match.size() < 2) {
+        throw std::runtime_error("Could not find extended private key in descriptor string");
+    }
+    CExtKey key = DecodeExtKey(match[1].str());
+    if (!key.key.IsValid()) {
+        throw std::runtime_error("Failed to decode extended private key from descriptor string");
+    }
+    return key;
 }
 
 BOOST_FIXTURE_TEST_CASE(update_non_range_descriptor, TestingSetup)
@@ -685,6 +702,521 @@ BOOST_FIXTURE_TEST_CASE(CreateWalletWithoutChain, BasicTestingSetup)
     auto wallet = TestCreateWallet(context);
     BOOST_CHECK(wallet);
     WaitForDeleteWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHSignFromWalletDescriptor, TestChain100Setup)
+{
+    // End-to-end sign+verify roundtrip for a wallet-owned P2TSH UTXO.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    CTxDestination dest;
+    {
+        LOCK(wallet->cs_wallet);
+        dest = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    }
+    const CScript script_pubkey = GetScriptForDestination(dest);
+
+    CMutableTransaction tx_credit;
+    tx_credit.vout.emplace_back(1000, script_pubkey);
+
+    CMutableTransaction tx_spend;
+    tx_spend.vin.emplace_back(tx_credit.GetHash(), 0);
+    tx_spend.vout.emplace_back(500, CScript{} << OP_TRUE);
+
+    std::map<COutPoint, Coin> coins;
+    Coin coin;
+    coin.out = tx_credit.vout[0];
+    coin.nHeight = 1;
+    coin.fCoinBase = false;
+    coins.emplace(tx_spend.vin[0].prevout, std::move(coin));
+
+    std::map<int, bilingual_str> input_errors;
+    BOOST_CHECK(wallet->SignTransaction(tx_spend, coins, SIGHASH_DEFAULT, input_errors));
+
+    const CTransaction tx_spend_const{tx_spend};
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx_spend_const, std::vector<CTxOut>{tx_credit.vout[0]}, true);
+
+    ScriptError err = SCRIPT_ERR_UNKNOWN_ERROR;
+    const bool ok = VerifyScript(tx_spend.vin[0].scriptSig, tx_credit.vout[0].scriptPubKey, &tx_spend.vin[0].scriptWitness,
+                                 SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+                                 TransactionSignatureChecker(&tx_spend_const, 0, tx_credit.vout[0].nValue, txdata, MissingDataBehavior::ASSERT_FAIL),
+                                 &err);
+    BOOST_CHECK(ok);
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHSignFinalizePSBTFromWalletDescriptor, TestChain100Setup)
+{
+    // Ensure PSBT signing/finalization works for P2TSH outputs from the wallet descriptor.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    CTxDestination dest;
+    {
+        LOCK(wallet->cs_wallet);
+        dest = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    }
+    const CScript script_pubkey = GetScriptForDestination(dest);
+
+    CMutableTransaction tx_credit;
+    tx_credit.vout.emplace_back(1000, script_pubkey);
+
+    CMutableTransaction tx_spend;
+    tx_spend.vin.emplace_back(tx_credit.GetHash(), 0);
+    tx_spend.vout.emplace_back(500, CScript{} << OP_TRUE);
+
+    PartiallySignedTransaction psbt{tx_spend};
+    psbt.inputs[0].witness_utxo = tx_credit.vout[0];
+
+    bool complete{false};
+    size_t n_signed{0};
+    const auto error = wallet->FillPSBT(psbt, complete, std::nullopt, /*sign=*/true, /*bip32derivs=*/true, &n_signed, /*finalize=*/true);
+    BOOST_CHECK(!error);
+    BOOST_CHECK_EQUAL(n_signed, 1U);
+    BOOST_CHECK(complete);
+    BOOST_CHECK(PSBTInputSigned(psbt.inputs[0]));
+
+    const PrecomputedTransactionData txdata = PrecomputePSBTData(psbt);
+    BOOST_CHECK(PSBTInputSignedAndVerified(psbt, 0, &txdata));
+    BOOST_CHECK(FinalizePSBT(psbt));
+
+    CMutableTransaction extracted;
+    BOOST_REQUIRE(FinalizeAndExtractPSBT(psbt, extracted));
+
+    const CTransaction extracted_tx{extracted};
+    PrecomputedTransactionData extracted_txdata;
+    extracted_txdata.Init(extracted_tx, std::vector<CTxOut>{tx_credit.vout[0]}, true);
+
+    ScriptError err = SCRIPT_ERR_UNKNOWN_ERROR;
+    const bool ok = VerifyScript(extracted.vin[0].scriptSig, tx_credit.vout[0].scriptPubKey, &extracted.vin[0].scriptWitness,
+                                 SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+                                 TransactionSignatureChecker(&extracted_tx, 0, tx_credit.vout[0].nValue, extracted_txdata, MissingDataBehavior::ASSERT_FAIL),
+                                 &err);
+    BOOST_CHECK(ok);
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHSignHashSingleCommitsOnlyMatchingOutput, TestChain100Setup)
+{
+    // SIGHASH_SINGLE should commit the signature to the output with the same index as the input.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    CTxDestination dest;
+    {
+        LOCK(wallet->cs_wallet);
+        dest = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    }
+    const CScript script_pubkey = GetScriptForDestination(dest);
+
+    CMutableTransaction tx_credit;
+    tx_credit.vout.emplace_back(2000, script_pubkey);
+
+    CMutableTransaction tx_spend;
+    tx_spend.vin.emplace_back(tx_credit.GetHash(), 0);
+    tx_spend.vout.emplace_back(1200, CScript{} << OP_TRUE);
+    tx_spend.vout.emplace_back(700, CScript{} << OP_TRUE);
+
+    std::map<COutPoint, Coin> coins;
+    Coin coin;
+    coin.out = tx_credit.vout[0];
+    coin.nHeight = 1;
+    coin.fCoinBase = false;
+    coins.emplace(tx_spend.vin[0].prevout, std::move(coin));
+
+    std::map<int, bilingual_str> input_errors;
+    BOOST_CHECK(wallet->SignTransaction(tx_spend, coins, SIGHASH_SINGLE, input_errors));
+
+    auto verify_signed_input = [&](const CMutableTransaction& spend, ScriptError& err) {
+        const CTransaction spend_const{spend};
+        PrecomputedTransactionData txdata;
+        txdata.Init(spend_const, std::vector<CTxOut>{tx_credit.vout[0]}, true);
+        return VerifyScript(spend.vin[0].scriptSig, tx_credit.vout[0].scriptPubKey, &spend.vin[0].scriptWitness,
+                            SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+                            TransactionSignatureChecker(&spend_const, 0, tx_credit.vout[0].nValue, txdata, MissingDataBehavior::ASSERT_FAIL),
+                            &err);
+    };
+
+    ScriptError err = SCRIPT_ERR_UNKNOWN_ERROR;
+    BOOST_CHECK(verify_signed_input(tx_spend, err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+
+    // Changing a non-matching output should not invalidate a SIGHASH_SINGLE signature.
+    CMutableTransaction tx_change_other_output{tx_spend};
+    tx_change_other_output.vout[1].nValue -= 1;
+    err = SCRIPT_ERR_UNKNOWN_ERROR;
+    BOOST_CHECK(verify_signed_input(tx_change_other_output, err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+
+    // Changing the matching output must invalidate the signature.
+    CMutableTransaction tx_change_matching_output{tx_spend};
+    tx_change_matching_output.vout[0].nValue -= 1;
+    err = SCRIPT_ERR_UNKNOWN_ERROR;
+    BOOST_CHECK(!verify_signed_input(tx_change_matching_output, err));
+    BOOST_CHECK_NE(err, SCRIPT_ERR_OK);
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHAddressRestoredFromHDMasterKey, TestChain100Setup)
+{
+    // Reconstruct descriptor managers from the HD master key and check first P2TSH address matches.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+
+    auto wallet_original = TestCreateWallet(context);
+
+    CExtKey master_key;
+    CTxDestination first_p2tsh_address;
+    {
+        LOCK(wallet_original->cs_wallet);
+        auto* bech32_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(wallet_original->GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/false));
+        BOOST_REQUIRE(bech32_spkm);
+
+        std::string priv_desc;
+        BOOST_REQUIRE(bech32_spkm->GetDescriptorString(priv_desc, /*priv=*/true));
+        master_key = ExtractMasterExtKeyFromDescriptor(priv_desc);
+
+        first_p2tsh_address = *Assert(wallet_original->GetNewDestination(OutputType::P2TSH, ""));
+    }
+
+    auto wallet_restored = TestCreateWallet(CreateMockableWalletDatabase(), context, WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET);
+    {
+        LOCK(wallet_restored->cs_wallet);
+        WalletBatch batch(wallet_restored->GetDatabase());
+        BOOST_REQUIRE(batch.TxnBegin());
+        wallet_restored->SetupDescriptorScriptPubKeyMans(batch, master_key);
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+
+    CTxDestination restored_first_p2tsh_address;
+    {
+        LOCK(wallet_restored->cs_wallet);
+        restored_first_p2tsh_address = *Assert(wallet_restored->GetNewDestination(OutputType::P2TSH, ""));
+    }
+
+    BOOST_CHECK_EQUAL(EncodeDestination(first_p2tsh_address), EncodeDestination(restored_first_p2tsh_address));
+
+    TestUnloadWallet(std::move(wallet_restored));
+    TestUnloadWallet(std::move(wallet_original));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHSelectedCoinControlAvailableBalance, TestChain100Setup)
+{
+    // Selected-input accounting and tx creation should work with a P2TSH receive output.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    const CTxDestination receive_dest = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    const CScript receive_script = GetScriptForDestination(receive_dest);
+
+    CMutableTransaction spend = TestSimpleSpend(*m_coinbase_txns[0], 0, coinbaseKey, receive_script);
+    CreateAndProcessBlock({spend}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const COutPoint outpoint{spend.GetHash(), 0};
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->mapWallet.contains(spend.GetHash()));
+        BOOST_REQUIRE(wallet->GetTXO(outpoint).has_value());
+    }
+
+    CCoinControl coin_control;
+    coin_control.m_allow_other_inputs = false;
+    coin_control.Select(outpoint);
+    coin_control.m_feerate = CFeeRate(1000);
+    coin_control.fOverrideFeeRate = true;
+
+    FastRandomContext rng;
+    CoinSelectionParams params(rng);
+    {
+        LOCK(wallet->cs_wallet);
+        const auto preset_inputs = *Assert(FetchSelectedInputs(*wallet, coin_control, params));
+        BOOST_CHECK_EQUAL(preset_inputs.total_amount, spend.vout[0].nValue);
+    }
+
+    // Ensure fee estimation succeeds with selected P2TSH inputs.
+    std::vector<CRecipient> recipients{{*Assert(wallet->GetNewDestination(OutputType::P2TSH, "")),
+                                        1 * COIN, /*fSubtractFeeFromAmount=*/false}};
+    auto tx_res = CreateTransaction(*wallet, recipients, /*change_pos=*/std::nullopt, coin_control);
+    BOOST_REQUIRE(tx_res);
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHSpendReceiveAndChangeFromCoinControl, TestChain100Setup)
+{
+    // Exercise coin control spend flow when both receive and change outputs are P2TSH.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    // Ensure we have at least two mature coinbase UTXOs available for spending.
+    CreateAndProcessBlock({}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    // Create two wallet UTXOs:
+    // - one from the receive (external) keypool
+    // - one change (internal) output created by the wallet
+    const CScript receive_script_1 = GetScriptForDestination(*Assert(wallet->GetNewDestination(OutputType::P2TSH, "")));
+    const CScript receive_script_2 = GetScriptForDestination(*Assert(wallet->GetNewDestination(OutputType::P2TSH, "")));
+    CMutableTransaction fund_1 = TestSimpleSpend(*m_coinbase_txns[0], 0, coinbaseKey, receive_script_1);
+    CMutableTransaction fund_2 = TestSimpleSpend(*m_coinbase_txns[1], 0, coinbaseKey, receive_script_2);
+    CreateAndProcessBlock({fund_1, fund_2}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const COutPoint receive_outpoint{fund_1.GetHash(), 0};
+    const COutPoint fund_outpoint{fund_2.GetHash(), 0};
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->GetTXO(receive_outpoint).has_value());
+        BOOST_REQUIRE(wallet->GetTXO(fund_outpoint).has_value());
+    }
+
+    // Create a transaction that spends the second UTXO but leaves P2TSH change.
+    CCoinControl cc_make_change;
+    cc_make_change.m_allow_other_inputs = false;
+    cc_make_change.Select(fund_outpoint);
+    cc_make_change.m_change_type = OutputType::P2TSH;
+    cc_make_change.m_feerate = CFeeRate(1000);
+    cc_make_change.fOverrideFeeRate = true;
+
+    const CTxDestination dest_nochange = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    std::vector<CRecipient> recipients_make_change{{dest_nochange, 1 * COIN, /*fSubtractFeeFromAmount=*/false}};
+    auto tx_with_change_res = CreateTransaction(*wallet, recipients_make_change, /*change_pos=*/std::nullopt, cc_make_change);
+    BOOST_REQUIRE(tx_with_change_res);
+    BOOST_REQUIRE(tx_with_change_res->change_pos.has_value());
+
+    const CTransactionRef& tx_with_change = tx_with_change_res->tx;
+    const unsigned int change_pos = *tx_with_change_res->change_pos;
+    BOOST_REQUIRE(change_pos < tx_with_change->vout.size());
+
+    // Mine the transaction so the change output becomes available.
+    CMutableTransaction tx_with_change_mut{*tx_with_change};
+    CreateAndProcessBlock({tx_with_change_mut}, GetScriptForRawPubKey(coinbaseKey.GetPubKey()));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const COutPoint change_outpoint{tx_with_change->GetHash(), change_pos};
+    {
+        LOCK(wallet->cs_wallet);
+        BOOST_REQUIRE(wallet->GetTXO(change_outpoint).has_value());
+    }
+
+    // Now try to spend *both* the receive and change outputs together with coin control
+    // (mirrors GUI behavior when selecting both UTXOs in coin control).
+    CCoinControl cc_spend_both;
+    cc_spend_both.m_allow_other_inputs = false;
+    cc_spend_both.Select(receive_outpoint);
+    cc_spend_both.Select(change_outpoint);
+    cc_spend_both.m_change_type = OutputType::P2TSH;
+    cc_spend_both.m_feerate = CFeeRate(1000);
+    cc_spend_both.fOverrideFeeRate = true;
+
+    const CTxDestination dest_spend = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    std::vector<CRecipient> recipients_spend{{dest_spend, 5000, /*fSubtractFeeFromAmount=*/false}};
+    auto spend_both_res = CreateTransaction(*wallet, recipients_spend, /*change_pos=*/std::nullopt, cc_spend_both);
+    BOOST_REQUIRE(spend_both_res);
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHMultipleReceiveAndChangeAddresses, TestChain100Setup)
+{
+    // Receive/change derivation should produce unique P2TSH addresses across reloads.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    const CTxDestination recv_1 = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    const CTxDestination recv_2 = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    const CTxDestination change_1 = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+    const CTxDestination change_2 = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+
+    BOOST_CHECK(recv_1 != recv_2);
+    BOOST_CHECK(change_1 != change_2);
+    BOOST_CHECK(recv_1 != change_1);
+    BOOST_CHECK(recv_2 != change_2);
+
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(recv_1));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(recv_2));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_1));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_2));
+
+    TestUnloadWallet(std::move(wallet));
+
+    wallet = TestLoadWallet(context);
+    const CTxDestination recv_3 = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+    const CTxDestination change_3 = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+
+    BOOST_CHECK(recv_3 != recv_1);
+    BOOST_CHECK(recv_3 != recv_2);
+    BOOST_CHECK(change_3 != change_1);
+    BOOST_CHECK(change_3 != change_2);
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(recv_3));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_3));
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHEncryptedWalletCanGetAddressesLocked, TestChain100Setup)
+{
+    // With a tiny keypool, locked encrypted wallets can use cached P2TSH entries but cannot top up.
+    m_args.ForceSetArg("-keypool", "1");
+
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    const SecureString passphrase{"p2tsh-test-passphrase"};
+    BOOST_REQUIRE(wallet->EncryptWallet(passphrase));
+    BOOST_REQUIRE(wallet->IsLocked());
+
+    DescriptorScriptPubKeyMan* receive_spkm;
+    DescriptorScriptPubKeyMan* change_spkm;
+    {
+        LOCK(wallet->cs_wallet);
+        receive_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(wallet->GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/false));
+        change_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(wallet->GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/true));
+        BOOST_REQUIRE(receive_spkm);
+        BOOST_REQUIRE(change_spkm);
+        BOOST_CHECK(receive_spkm->CanGetAddresses(/*internal=*/false));
+        BOOST_CHECK(change_spkm->CanGetAddresses(/*internal=*/true));
+    }
+
+    {
+        LOCK(wallet->cs_wallet);
+        // First receive/change addresses are available from the pre-generated cache.
+        const CTxDestination receive_1 = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+        const CTxDestination change_1 = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(receive_1));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_1));
+
+        // Next addresses require top-up and should fail while the wallet is locked.
+        BOOST_CHECK(!wallet->GetNewDestination(OutputType::P2TSH, ""));
+        BOOST_CHECK(!wallet->GetNewChangeDestination(OutputType::P2TSH));
+    }
+
+    BOOST_REQUIRE(wallet->Unlock(passphrase));
+    {
+        LOCK(wallet->cs_wallet);
+        // Unlocking restores private key access, so top-up and derivation continue.
+        const CTxDestination receive_2 = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+        const CTxDestination change_2 = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(receive_2));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_2));
+    }
+    BOOST_REQUIRE(wallet->Lock());
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHReserveReturnReuse, TestChain100Setup)
+{
+    // Returning a reserved P2TSH change destination should make it reusable; keeping should advance.
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    CTxDestination addr_returned;
+    CTxDestination addr_reused;
+    CTxDestination addr_next;
+    {
+        LOCK(wallet->cs_wallet);
+
+        ReserveDestination reserve(wallet.get(), OutputType::P2TSH);
+        addr_returned = *Assert(reserve.GetReservedDestination(/*internal=*/true));
+        reserve.ReturnDestination();
+
+        ReserveDestination reserve_reuse(wallet.get(), OutputType::P2TSH);
+        addr_reused = *Assert(reserve_reuse.GetReservedDestination(/*internal=*/true));
+        reserve_reuse.KeepDestination();
+
+        ReserveDestination reserve_next(wallet.get(), OutputType::P2TSH);
+        addr_next = *Assert(reserve_next.GetReservedDestination(/*internal=*/true));
+        reserve_next.ReturnDestination();
+    }
+
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(addr_returned));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(addr_reused));
+    BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(addr_next));
+    BOOST_CHECK_EQUAL(EncodeDestination(addr_returned), EncodeDestination(addr_reused));
+    BOOST_CHECK(EncodeDestination(addr_next) != EncodeDestination(addr_reused));
+
+    TestUnloadWallet(std::move(wallet));
+}
+
+BOOST_FIXTURE_TEST_CASE(P2TSHCanGetAddressesAfterReloadLocked, TestChain100Setup)
+{
+    // After reload in locked state, cached P2TSH addresses remain usable but top-up requires unlock.
+    m_args.ForceSetArg("-keypool", "1");
+
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    auto wallet = TestCreateWallet(context);
+
+    const SecureString passphrase{"p2tsh-reload-passphrase"};
+    BOOST_REQUIRE(wallet->EncryptWallet(passphrase));
+    TestUnloadWallet(std::move(wallet));
+
+    wallet = TestLoadWallet(context);
+    BOOST_REQUIRE(wallet);
+    BOOST_REQUIRE(wallet->IsLocked());
+
+    DescriptorScriptPubKeyMan* receive_spkm;
+    DescriptorScriptPubKeyMan* change_spkm;
+    {
+        LOCK(wallet->cs_wallet);
+        receive_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(wallet->GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/false));
+        change_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(wallet->GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/true));
+        BOOST_REQUIRE(receive_spkm);
+        BOOST_REQUIRE(change_spkm);
+        BOOST_CHECK(receive_spkm->CanGetAddresses(/*internal=*/false));
+        BOOST_CHECK(change_spkm->CanGetAddresses(/*internal=*/true));
+    }
+
+    {
+        LOCK(wallet->cs_wallet);
+        // Cached receive/change addresses are still available immediately after reload.
+        BOOST_REQUIRE(wallet->GetNewDestination(OutputType::P2TSH, ""));
+        BOOST_REQUIRE(wallet->GetNewChangeDestination(OutputType::P2TSH));
+
+        // Additional derivation fails while locked because no private keys are available for top-up.
+        BOOST_CHECK(!wallet->GetNewDestination(OutputType::P2TSH, ""));
+        BOOST_CHECK(!wallet->GetNewChangeDestination(OutputType::P2TSH));
+    }
+
+    BOOST_REQUIRE(wallet->Unlock(passphrase));
+    {
+        LOCK(wallet->cs_wallet);
+        // Unlock allows on-demand top-up and address generation to continue.
+        const CTxDestination receive_after_unlock = *Assert(wallet->GetNewDestination(OutputType::P2TSH, ""));
+        const CTxDestination change_after_unlock = *Assert(wallet->GetNewChangeDestination(OutputType::P2TSH));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(receive_after_unlock));
+        BOOST_CHECK(std::holds_alternative<WitnessV2Taproot>(change_after_unlock));
+    }
+    BOOST_REQUIRE(wallet->Lock());
+
+    TestUnloadWallet(std::move(wallet));
 }
 
 BOOST_FIXTURE_TEST_CASE(RemoveTxs, TestChain100Setup)
