@@ -170,7 +170,8 @@ if [ "${RUN_TIDY}" = "true" ]; then
   set -eo pipefail
   # Filter out:
   # * qt qrc and moc generated files
-  jq 'map(select(.file | test("src/qt/.*_autogen/.*\\.cpp$") | not))' "${BASE_BUILD_DIR}/compile_commands.json" > tmp.json
+  # * mldsa-native sources
+  jq 'map(select((.file | test("src/qt/.*_autogen/.*\\.cpp$")) or (.file | test("src/mldsa-native/")) | not))' "${BASE_BUILD_DIR}/compile_commands.json" > tmp.json
   mv tmp.json "${BASE_BUILD_DIR}/compile_commands.json"
 
   cd "${BASE_BUILD_DIR}/src/"
