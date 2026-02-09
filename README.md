@@ -1,3 +1,19 @@
+Post-quantum Bitcoin testnet fork
+=================================
+
+[![CI](https://github.com/masato83/quantum-testnet/actions/workflows/ci.yml/badge.svg)](https://github.com/masato83/quantum-testnet/actions/workflows/ci.yml)
+
+This is a hard fork of Bitcoin testnet3 with a limited set of changes to support post-quantum signatures with reasonable throughput:
+- 30-second block time (block size unchanged)
+- P2TSH outputs (Taproot outputs without key-path spends, BIP360)
+- 15,000-byte element size limit within P2TSH
+- ML-DSA-87 signature verification within P2TSH (NIST L5)
+- Experimental wallet support for P2TSH with ML-DSA
+
+There are no additional opcodes - `EvalChecksigTapscript` applies ML-DSA depending on pubkey size, so `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` support ML-DSA signatures in P2TSH. Non-P2TSH script evaluation is unchanged.
+
+Build instructions: `doc/build-*`. Everything should build on all platforms (including GUI) and all unit tests should pass.
+
 Bitcoin Core integration/staging tree
 =====================================
 
@@ -77,3 +93,8 @@ Translations are periodically pulled from Transifex and merged into the git repo
 
 **Important**: We do not accept translation changes as GitHub pull requests because the next
 pull from Transifex would automatically overwrite them again.
+
+Disclaimer
+----------
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
