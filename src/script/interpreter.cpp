@@ -1420,14 +1420,14 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut>&& spent
     for (size_t inpos = 0; inpos < txTo.vin.size() && !(uses_bip143_segwit && uses_bip341_taproot); ++inpos) {
         if (!txTo.vin[inpos].scriptWitness.IsNull()) {
             if (m_spent_outputs_ready && m_spent_outputs[inpos].scriptPubKey.size() == 2 + WITNESS_V1_TAPROOT_SIZE &&
-                m_spent_outputs[inpos].scriptPubKey[0] == OP_1) {
-                // Treat every witness-bearing spend with 34-byte scriptPubKey that starts with OP_1 as a Taproot
+                (m_spent_outputs[inpos].scriptPubKey[0] == OP_1 || m_spent_outputs[inpos].scriptPubKey[0] == OP_2)) {
+                // Treat every witness-bearing spend with 34-byte scriptPubKey that starts with OP_1/OP_2 as a Taproot
                 // spend. This only works if spent_outputs was provided as well, but if it wasn't, actual validation
                 // will fail anyway. Note that this branch may trigger for scriptPubKeys that aren't actually segwit
                 // but in that case validation will fail as SCRIPT_ERR_WITNESS_UNEXPECTED anyway.
                 uses_bip341_taproot = true;
             } else {
-                // Treat every spend that's not known to native witness v1 as a Witness v0 spend. This branch may
+                // Treat every spend that's not known to native witness v1/v2 as a Witness v0 spend. This branch may
                 // also be taken for unknown witness versions, but it is harmless, and being precise would require
                 // P2SH evaluation to find the redeemScript.
                 uses_bip143_segwit = true;
@@ -1904,6 +1904,21 @@ uint256 ComputeTaprootMerkleRoot(std::span<const unsigned char> control, const u
     return k;
 }
 
+uint256 ComputeTaprootP2TSHMerkleRoot(std::span<const unsigned char> control, const uint256& tapleaf_hash)
+{
+    assert(control.size() >= P2TSH_CONTROL_BASE_SIZE);
+    assert(control.size() <= P2TSH_CONTROL_MAX_SIZE);
+    assert((control.size() - P2TSH_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE == 0);
+
+    const int path_len = (control.size() - P2TSH_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;
+    uint256 k = tapleaf_hash;
+    for (int i = 0; i < path_len; ++i) {
+        std::span node{std::span{control}.subspan(P2TSH_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * i, TAPROOT_CONTROL_NODE_SIZE)};
+        k = ComputeTapbranchHash(k, node);
+    }
+    return k;
+}
+
 static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, const std::vector<unsigned char>& program, const uint256& tapleaf_hash)
 {
     assert(control.size() >= TAPROOT_CONTROL_BASE_SIZE);
@@ -1916,6 +1931,14 @@ static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, c
     const uint256 merkle_root = ComputeTaprootMerkleRoot(control, tapleaf_hash);
     // Verify that the output pubkey matches the tweaked internal pubkey, after correcting for parity.
     return q.CheckTapTweak(p, merkle_root, control[0] & 1);
+}
+
+static bool VerifyTaprootP2TSHCommitment(const std::vector<unsigned char>& control, const std::vector<unsigned char>& program, const uint256& tapleaf_hash)
+{
+    assert(control.size() >= P2TSH_CONTROL_BASE_SIZE);
+    assert(program.size() == uint256::size());
+    const uint256 merkle_root = ComputeTaprootP2TSHMerkleRoot(control, tapleaf_hash);
+    return merkle_root == uint256{program};
 }
 
 static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, const std::vector<unsigned char>& program, script_verify_flags flags, const BaseSignatureChecker& checker, ScriptError* serror, bool is_p2sh)
@@ -1948,9 +1971,15 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         } else {
             return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH);
         }
-    } else if (witversion == 1 && program.size() == WITNESS_V1_TAPROOT_SIZE && !is_p2sh) {
-        // BIP341 Taproot: 32-byte non-P2SH witness v1 program (which encodes a P2C-tweaked pubkey)
+    } else if ((witversion == 1 || witversion == 2) && program.size() == WITNESS_V1_TAPROOT_SIZE && !is_p2sh) {
         if (!(flags & SCRIPT_VERIFY_TAPROOT)) return set_success(serror);
+        if (witversion == 2 && !(flags & SCRIPT_VERIFY_QUANTUM)) {
+            // P2TSH
+            if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
+                return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM);
+            }
+            return set_success(serror);
+        }
         if (stack.size() == 0) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
         if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
             // Drop annex (this is non-standard; see IsWitnessStandard)
@@ -1963,6 +1992,10 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         execdata.m_annex_init = true;
         if (stack.size() == 1) {
             // Key path spending (stack size is 1 after removing optional annex)
+            if (witversion == 2) {
+                // P2TSH does not support key-path spending
+                return set_error(serror, SCRIPT_ERR_P2TSH_KEY_PATH_UNEXPECTED);
+            }
             if (!checker.CheckSchnorrSignature(stack.front(), program, SigVersion::TAPROOT, execdata, serror)) {
                 return false; // serror is set
             }
@@ -1971,12 +2004,30 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
             // Script path spending (stack size is >1 after removing optional annex)
             const valtype& control = SpanPopBack(stack);
             const valtype& script = SpanPopBack(stack);
-            if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > TAPROOT_CONTROL_MAX_SIZE || ((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) {
-                return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+            if (witversion == 1) {
+                // legacy control block with internal key
+                if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > TAPROOT_CONTROL_MAX_SIZE || ((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) {
+                    return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                }
+            } else {
+                // P2TSH control block without internal key
+                if (control.size() < P2TSH_CONTROL_BASE_SIZE || control.size() > P2TSH_CONTROL_MAX_SIZE || ((control.size() - P2TSH_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) {
+                    return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                }
+                if ((control[0] & 1) == 0) {
+                    // Parity bit must be 1 (see BIP360)
+                    return set_error(serror, SCRIPT_ERR_P2TSH_WRONG_PARITY_BIT);
+                }
             }
             execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, script);
-            if (!VerifyTaprootCommitment(control, program, execdata.m_tapleaf_hash)) {
-                return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
+            if (witversion == 1) {
+                if (!VerifyTaprootCommitment(control, program, execdata.m_tapleaf_hash)) {
+                    return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
+                }
+            } else {
+                if (!VerifyTaprootP2TSHCommitment(control, program, execdata.m_tapleaf_hash)) {
+                    return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
+                }
             }
             execdata.m_tapleaf_hash_init = true;
             if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {

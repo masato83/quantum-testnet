@@ -13,6 +13,7 @@
 #include <script/sign.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
+#include <script/verify_flags.h>
 #include <secp256k1.h>
 #include <streams.h>
 #include <test/data/bip341_wallet_vectors.json.h>
@@ -1723,6 +1724,90 @@ BOOST_AUTO_TEST_CASE(formatscriptflags)
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int(1u<<27)), "TAPROOT,0x08000000");
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int((1u<<28) | (1ull<<58))), "TAPROOT,0x400000010000000");
     BOOST_CHECK_EQUAL(FormatScriptFlags(script_verify_flags::from_int(1u<<26)), "0x04000000");
+}
+
+BOOST_AUTO_TEST_CASE(p2tsh)
+{
+    auto TapleafHash = [](uint8_t leaf_version, const CScript& script) {
+        return (HashWriter{HASHER_TAPLEAF} << leaf_version << CompactSizeWriter(script.size())
+                                           << std::span<const unsigned char>{script})
+            .GetSHA256();
+    };
+
+    const script_verify_flags flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM;
+    const CAmount amount{1000};
+
+    auto RunCase = [&](const std::string& name, const CScript& script, const std::vector<unsigned char>& control,
+                       const uint256& program, const std::vector<std::vector<unsigned char>>& stack_items,
+                       ScriptError_t expected_error, bool expect_valid) {
+        CScript script_pubkey = CScript() << OP_2 << ToByteVector(program);
+        CMutableTransaction tx_credit = BuildCreditingTransaction(script_pubkey, amount);
+        CScriptWitness witness;
+        for (const auto& item : stack_items) {
+            witness.stack.push_back(item);
+        }
+        witness.stack.push_back(ToByteVector(script));
+        witness.stack.push_back(control);
+        CMutableTransaction tx_spend = BuildSpendingTransaction(CScript(), witness, CTransaction(tx_credit));
+        const CTransaction tx_spend_const{tx_spend};
+        PrecomputedTransactionData txdata{tx_spend_const};
+        ScriptError err{SCRIPT_ERR_UNKNOWN_ERROR};
+        const bool ok = VerifyScript(tx_spend_const.vin[0].scriptSig,
+                                     tx_credit.vout[0].scriptPubKey,
+                                     &tx_spend_const.vin[0].scriptWitness,
+                                     flags,
+                                     TransactionSignatureChecker(&tx_spend_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL),
+                                     &err);
+        BOOST_CHECK_MESSAGE(ok == expect_valid, name);
+        BOOST_CHECK_MESSAGE(err == expected_error, name << " (got " << ScriptErrorString(err) << ")");
+    };
+
+    // Wrong control size: size must be 1 + 32*n for v2, but we provide 2 bytes.
+    RunCase("P2TSH wrong control size",
+            CScript(),
+            std::vector<unsigned char>{0x00, 0x00},
+            uint256::FromHex("1111111111111111111111111111111111111111111111111111111111111111").value(),
+            /*stack_items=*/{},
+            SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE,
+            /*expect_valid=*/false);
+
+    // Wrong parity bit: control byte parity must be 1 for v2 (use 0xc0 to force failure).
+    RunCase("P2TSH wrong parity bit",
+            CScript(),
+            std::vector<unsigned char>{0xc0},
+            uint256::FromHex("2222222222222222222222222222222222222222222222222222222222222222").value(),
+            /*stack_items=*/{},
+            SCRIPT_ERR_P2TSH_WRONG_PARITY_BIT,
+            /*expect_valid=*/false);
+
+    // Witness program mismatch: control passes parity, but program != tapleaf hash.
+    RunCase("P2TSH witness program mismatch",
+            CScript(),
+            std::vector<unsigned char>{0xc1},
+            uint256::FromHex("3333333333333333333333333333333333333333333333333333333333333333").value(),
+            /*stack_items=*/{},
+            SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH,
+            /*expect_valid=*/false);
+
+    // Script evaluation fails with SCRIPT_ERR_EVAL_FALSE: OP_1 OP_2 OP_EQUAL.
+    const CScript script_fail = CScript() << OP_2 << OP_EQUAL;
+    RunCase("P2TSH script verify fails",
+            script_fail,
+            std::vector<unsigned char>{0xc1},
+            TapleafHash(TAPROOT_LEAF_TAPSCRIPT, script_fail),
+            /*stack_items=*/{std::vector<unsigned char>{0x01}},
+            SCRIPT_ERR_EVAL_FALSE,
+            /*expect_valid=*/false);
+
+    // Script evaluation succeeds: OP_2 OP_2 OP_EQUAL.
+    const CScript script_ok = CScript() << OP_2 << OP_EQUAL;
+    RunCase("P2TSH script verify passes",
+            script_ok,
+            std::vector<unsigned char>{0xc1},
+            TapleafHash(TAPROOT_LEAF_TAPSCRIPT, script_ok),
+            /*stack_items=*/{std::vector<unsigned char>{0x02}},
+            SCRIPT_ERR_OK,
+            /*expect_valid=*/true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

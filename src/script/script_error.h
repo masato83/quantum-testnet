@@ -8,8 +8,7 @@
 
 #include <string>
 
-typedef enum ScriptError_t
-{
+typedef enum ScriptError_t {
     SCRIPT_ERR_OK = 0,
     SCRIPT_ERR_UNKNOWN_ERROR,
     SCRIPT_ERR_EVAL_FALSE,
@@ -79,6 +78,10 @@ typedef enum ScriptError_t
     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
     SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY,
+
+    /* P2TSH */
+    SCRIPT_ERR_P2TSH_KEY_PATH_UNEXPECTED,
+    SCRIPT_ERR_P2TSH_WRONG_PARITY_BIT,
 
     /* Constant scriptCode */
     SCRIPT_ERR_OP_CODESEPARATOR,

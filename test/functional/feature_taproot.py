@@ -846,7 +846,7 @@ def spenders_taproot_active():
     # == Test that BIP341 spending only applies to witness version 1, program length 32, no P2SH ==
 
     for p2sh in [False, True]:
-        for witver in range(1, 17):
+        for witver in [v for v in range(1, 17) if v != 2]:
             for witlen in [20, 31, 32, 33]:
                 def mutate(spk):
                     prog = spk[2:]

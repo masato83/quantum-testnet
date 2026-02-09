@@ -43,6 +43,7 @@
 #include <random.h>
 #include <script/script.h>
 #include <script/sigcache.h>
+#include <script/verify_flags.h>
 #include <signet.h>
 #include <tinyformat.h>
 #include <txdb.h>
@@ -68,6 +69,7 @@
 #include <cassert>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <ranges>
@@ -1138,7 +1140,13 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     const CTransaction& tx = *ws.m_ptx;
     TxValidationState& state = ws.m_state;
 
-    constexpr script_verify_flags scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    script_verify_flags scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    const int quantum_height = m_active_chainstate.m_chainman.GetConsensus().QuantumHeight;
+    if (quantum_height < std::numeric_limits<int>::max()) {
+        // Ensure mempool accepts P2TSH spends.
+        // No need to fetch the exact tip height as quantum_height is either 0 or INT_MAX.
+        scriptVerifyFlags |= SCRIPT_VERIFY_QUANTUM;
+    }
 
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
