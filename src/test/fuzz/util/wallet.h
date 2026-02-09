@@ -66,12 +66,20 @@ struct FuzzedWallet {
     }
     CTxDestination GetDestination(FuzzedDataProvider& fuzzed_data_provider)
     {
-        auto type{fuzzed_data_provider.PickValueInArray(OUTPUT_TYPES)};
-        if (fuzzed_data_provider.ConsumeBool()) {
-            return *Assert(wallet->GetNewDestination(type, ""));
-        } else {
-            return *Assert(wallet->GetNewChangeDestination(type));
+        const bool internal{fuzzed_data_provider.ConsumeBool()};
+        std::vector<OutputType> available_types;
+        available_types.reserve(OUTPUT_TYPES.size());
+        for (const OutputType type : OUTPUT_TYPES) {
+            if (wallet->GetScriptPubKeyMan(type, internal)) available_types.push_back(type);
         }
+        while (!available_types.empty()) {
+            const auto it = available_types.begin() + fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, available_types.size() - 1);
+            const OutputType type{*it};
+            const auto dest{internal ? wallet->GetNewChangeDestination(type) : wallet->GetNewDestination(type, "")};
+            if (dest) return *dest;
+            available_types.erase(it);
+        }
+        return CNoDestination{};
     }
     CScript GetScriptPubKey(FuzzedDataProvider& fuzzed_data_provider) { return GetScriptForDestination(GetDestination(fuzzed_data_provider)); }
 };

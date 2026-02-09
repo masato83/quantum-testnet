@@ -2,10 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <test/data/tx_invalid.json.h>
-#include <test/data/tx_valid.json.h>
-#include <test/util/setup_common.h>
-
 #include <checkqueue.h>
 #include <clientversion.h>
 #include <consensus/amount.h>
@@ -25,21 +21,24 @@
 #include <script/signingprovider.h>
 #include <script/solver.h>
 #include <streams.h>
+#include <test/data/tx_invalid.json.h>
+#include <test/data/tx_valid.json.h>
 #include <test/util/json.h>
 #include <test/util/random.h>
 #include <test/util/script.h>
+#include <test/util/setup_common.h>
 #include <test/util/transaction_utils.h>
+#include <uint256.h>
+#include <univalue.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <validation.h>
 
+#include <boost/test/unit_test.hpp>
+
 #include <functional>
 #include <map>
 #include <string>
-
-#include <boost/test/unit_test.hpp>
-
-#include <univalue.h>
 
 using namespace util::hex_literals;
 using util::SplitString;
@@ -1138,8 +1137,8 @@ BOOST_AUTO_TEST_CASE(spends_witness_prog)
     std::vector<std::vector<uint8_t>> sol_dummy;
 
     // CNoDestination, PubKeyDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash,
-    // WitnessV1Taproot, PayToAnchor, WitnessUnknown.
-    static_assert(std::variant_size_v<CTxDestination> == 9);
+    // WitnessV1Taproot, WitnessV2Taproot, PayToAnchor, WitnessUnknown.
+    static_assert(std::variant_size_v<CTxDestination> == 10);
 
     // Go through all defined output types and sanity check SpendsNonAnchorWitnessProg.
 
@@ -1222,6 +1221,24 @@ BOOST_AUTO_TEST_CASE(spends_witness_prog)
     tx_spend.vin[0].scriptSig.clear();
     BOOST_CHECK(!::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
 
+    // P2TSH
+    tx_create.vout[0].scriptPubKey = GetScriptForDestination(WitnessV2Taproot{uint256::ONE});
+    BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), TxoutType::WITNESS_V2_TAPROOT);
+    tx_spend.vin[0].prevout.hash = tx_create.GetHash();
+    AddCoins(coins, CTransaction{tx_create}, 0, false);
+    BOOST_CHECK(::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
+
+    // P2SH-wrapped P2TSH (undefined, non-standard)
+    redeem_script = tx_create.vout[0].scriptPubKey;
+    tx_create.vout[0].scriptPubKey = GetScriptForDestination(ScriptHash(redeem_script));
+    BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), TxoutType::SCRIPTHASH);
+    tx_spend.vin[0].prevout.hash = tx_create.GetHash();
+    tx_spend.vin[0].scriptSig = CScript{} << ToByteVector(redeem_script);
+    AddCoins(coins, CTransaction{tx_create}, 0, false);
+    BOOST_CHECK(::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
+    tx_spend.vin[0].scriptSig.clear();
+    BOOST_CHECK(!::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
+
     // P2A
     tx_create.vout[0].scriptPubKey = GetScriptForDestination(PayToAnchor{});
     BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), TxoutType::ANCHOR);
@@ -1259,7 +1276,7 @@ BOOST_AUTO_TEST_CASE(spends_witness_prog)
 
     // Various undefined version >1 32-byte witness programs.
     const auto program{ToByteVector(XOnlyPubKey{pubkey})};
-    for (int i{2}; i <= 16; ++i) {
+    for (int i{3}; i <= 16; ++i) {
         tx_create.vout[0].scriptPubKey = GetScriptForDestination(WitnessUnknown{i, program});
         BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), TxoutType::WITNESS_UNKNOWN);
         tx_spend.vin[0].prevout.hash = tx_create.GetHash();

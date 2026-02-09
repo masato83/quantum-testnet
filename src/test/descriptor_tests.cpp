@@ -2,8 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <crypto/mldsa.h>
 #include <pubkey.h>
 #include <script/descriptor.h>
+#include <script/interpreter.h>
 #include <script/sign.h>
 #include <test/util/setup_common.h>
 #include <util/check.h>
@@ -12,6 +14,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
+#include <numeric>
 #include <optional>
 #include <regex>
 #include <string>
@@ -1324,6 +1328,67 @@ BOOST_AUTO_TEST_CASE(descriptor_older_warnings)
         BOOST_REQUIRE_MESSAGE(!descs.empty(), err);
         BOOST_CHECK(descs[0]->Warnings().empty());
     }
+}
+
+BOOST_AUTO_TEST_CASE(descriptor_mldsa)
+{
+    std::array<unsigned char, mldsa::MLDSA_SEED_SIZE> seed{};
+    std::iota(seed.begin(), seed.end(), 0);
+
+    std::vector<unsigned char> pubkey(mldsa::MLDSA87_PUBLICKEY_SIZE);
+    std::vector<unsigned char> seckey(mldsa::MLDSA87_SECRETKEY_SIZE);
+    BOOST_REQUIRE(mldsa::KeypairFromSeed(seed, pubkey, seckey));
+
+    const std::string pub_desc = "mldsa(" + HexStr(pubkey) + ")";
+    const std::string sec_desc = "mldsa(" + HexStr(seckey) + ")";
+
+    FlatSigningProvider keys;
+    std::string err;
+    auto pub_parsed = Parse(pub_desc, keys, err);
+    BOOST_REQUIRE_MESSAGE(!pub_parsed.empty(), err);
+    auto sec_parsed = Parse(sec_desc, keys, err);
+    BOOST_CHECK(sec_parsed.empty());
+    BOOST_CHECK_EQUAL(err, strprintf("mldsa(): mldsa key has invalid size %u; expected %u-byte public key",
+                                     static_cast<unsigned int>(mldsa::MLDSA87_SECRETKEY_SIZE),
+                                     static_cast<unsigned int>(mldsa::MLDSA87_PUBLICKEY_SIZE)));
+
+    BOOST_CHECK(EqualDescriptor(pub_parsed[0]->ToString(), pub_desc));
+    BOOST_CHECK(pub_parsed[0]->GetOutputType() == OutputType::P2TSH);
+
+    std::string priv_out;
+    BOOST_CHECK(!pub_parsed[0]->ToPrivateString(keys, priv_out));
+    BOOST_CHECK(!pub_parsed[0]->HavePrivateKeys(keys));
+
+    std::vector<CScript> scripts;
+    FlatSigningProvider out_provider;
+    BOOST_REQUIRE(pub_parsed[0]->Expand(0, DUMMY_SIGNING_PROVIDER, scripts, out_provider));
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+
+    const CScript leaf_script = CScript() << pubkey << OP_CHECKSIG;
+    const uint256 tapleaf_hash = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+    const CScript expected = GetScriptForDestination(WitnessV2Taproot{tapleaf_hash});
+    BOOST_CHECK_EQUAL(HexStr(scripts[0]), HexStr(expected));
+
+    const auto expected_max_sat_size =
+        GetSizeOfCompactSize(mldsa::MLDSA87_SIGNATURE_SIZE + 1) + (mldsa::MLDSA87_SIGNATURE_SIZE + 1) +
+        GetSizeOfCompactSize(leaf_script.size()) + leaf_script.size() +
+        GetSizeOfCompactSize(1) + 1;
+    BOOST_CHECK(pub_parsed[0]->MaxSatisfactionWeight(true).has_value());
+    BOOST_CHECK(pub_parsed[0]->MaxSatisfactionWeight(false).has_value());
+    BOOST_CHECK_EQUAL(*pub_parsed[0]->MaxSatisfactionWeight(true), expected_max_sat_size);
+    BOOST_CHECK_EQUAL(*pub_parsed[0]->MaxSatisfactionWeight(false), expected_max_sat_size);
+    BOOST_CHECK(pub_parsed[0]->MaxSatisfactionElems().has_value());
+    BOOST_CHECK_EQUAL(*pub_parsed[0]->MaxSatisfactionElems(), 3);
+
+    FlatSigningProvider bad_keys;
+    auto bad_size = Parse("mldsa(00)", bad_keys, err);
+    BOOST_CHECK(bad_size.empty());
+    BOOST_CHECK_EQUAL(err, strprintf("mldsa(): mldsa key has invalid size 1; expected %u-byte public key",
+                                     static_cast<unsigned int>(mldsa::MLDSA87_PUBLICKEY_SIZE)));
+
+    auto nested = Parse("sh(mldsa(00))", bad_keys, err);
+    BOOST_CHECK(nested.empty());
+    BOOST_CHECK_EQUAL(err, "Can only have mldsa() at top level");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

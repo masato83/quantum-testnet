@@ -2,20 +2,19 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <test/data/bip341_wallet_vectors.json.h>
-
 #include <addresstype.h>
 #include <key.h>
 #include <key_io.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
+#include <test/data/bip341_wallet_vectors.json.h>
 #include <test/util/setup_common.h>
+#include <uint256.h>
+#include <univalue.h>
 #include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
-
-#include <univalue.h>
 
 using namespace util::hex_literals;
 
@@ -121,6 +120,13 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_success)
     BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_V1_TAPROOT);
     BOOST_CHECK_EQUAL(solutions.size(), 1U);
     BOOST_CHECK(solutions[0] == ToByteVector(uint256::ZERO));
+
+    // TxoutType::WITNESS_V2_TAPROOT
+    s.clear();
+    s << OP_2 << ToByteVector(uint256::ONE);
+    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_V2_TAPROOT);
+    BOOST_CHECK_EQUAL(solutions.size(), 1U);
+    BOOST_CHECK(solutions[0] == ToByteVector(uint256::ONE));
 
     // TxoutType::WITNESS_UNKNOWN
     s.clear();
@@ -283,6 +289,12 @@ BOOST_AUTO_TEST_CASE(script_standard_ExtractDestination)
     BOOST_CHECK(ExtractDestination(s, address));
     BOOST_CHECK(std::get<WitnessV1Taproot>(address) == WitnessV1Taproot(xpk));
 
+    // TxoutType::WITNESS_V2_TAPROOT
+    s.clear();
+    s << OP_2 << ToByteVector(uint256::ONE);
+    BOOST_CHECK(ExtractDestination(s, address));
+    BOOST_CHECK(std::get<WitnessV2Taproot>(address) == WitnessV2Taproot(uint256::ONE));
+
     // TxoutType::ANCHOR
     s.clear();
     s << OP_1 << ANCHOR_BYTES;
@@ -297,10 +309,10 @@ BOOST_AUTO_TEST_CASE(script_standard_ExtractDestination)
     WitnessUnknown unk_v1{1, ToByteVector(pubkey)};
     BOOST_CHECK(std::get<WitnessUnknown>(address) == unk_v1);
     s.clear();
-    // -> segwit versions 2+ are not specified yet
-    s << OP_2 << ToByteVector(xpk);
+    // -> segwit versions 3+ are not specified yet
+    s << OP_3 << ToByteVector(xpk);
     BOOST_CHECK(ExtractDestination(s, address));
-    WitnessUnknown unk_v2{2, ToByteVector(xpk)};
+    WitnessUnknown unk_v2{3, ToByteVector(xpk)};
     BOOST_CHECK(std::get<WitnessUnknown>(address) == unk_v2);
 }
 

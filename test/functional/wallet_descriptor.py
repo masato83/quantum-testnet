@@ -87,12 +87,12 @@ class WalletDescriptorTest(BitcoinTestFramework):
         self.nodes[0].createwallet(wallet_name="desc1")
         wallet = self.nodes[0].get_wallet_rpc("desc1")
 
-        # A descriptor wallet should have 100 addresses * 4 types = 400 keys
+        # A descriptor wallet should have 100 addresses * 5 types = 500 keys
         self.log.info("Checking wallet info")
         wallet_info = wallet.getwalletinfo()
         assert_equal(wallet_info['format'], 'sqlite')
-        assert_equal(wallet_info['keypoolsize'], 400)
-        assert_equal(wallet_info['keypoolsize_hd_internal'], 400)
+        assert_equal(wallet_info['keypoolsize'], 500)
+        assert_equal(wallet_info['keypoolsize_hd_internal'], 500)
         assert 'keypoololdest' not in wallet_info
 
         # Check that getnewaddress works
@@ -181,7 +181,7 @@ class WalletDescriptorTest(BitcoinTestFramework):
         for _ in range(100):
             send_wrpc.getnewaddress(address_type='bech32')
         # This should now error
-        assert_raises_rpc_error(-12, "Keypool ran out, please call keypoolrefill first", send_wrpc.getnewaddress, '', 'bech32')
+        assert_raises_rpc_error(-12, "No addresses available", send_wrpc.getnewaddress, '', 'bech32')
 
         self.log.info("Test born encrypted wallets")
         self.nodes[0].createwallet('desc_enc', False, False, 'pass', False, True)

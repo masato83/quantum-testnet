@@ -2,18 +2,18 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <wallet/wallet.h>
-
 #include <qt/receivecoinsdialog.h>
-#include <qt/forms/ui_receivecoinsdialog.h>
 
+#include <chainparams.h>
 #include <qt/addresstablemodel.h>
+#include <qt/forms/ui_receivecoinsdialog.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/receiverequestdialog.h>
 #include <qt/recentrequeststablemodel.h>
 #include <qt/walletmodel.h>
+#include <wallet/wallet.h>
 
 #include <QAction>
 #include <QCursor>
@@ -98,6 +98,9 @@ void ReceiveCoinsDialog::setModel(WalletModel *_model)
         add_address_type(OutputType::BECH32, tr("Bech32 (SegWit)"), tr("Generates a native segwit address (BIP-173). Some old wallets don't support it."));
         if (model->wallet().taprootEnabled()) {
             add_address_type(OutputType::BECH32M, tr("Bech32m (Taproot)"), tr("Bech32m (BIP-350) is an upgrade to Bech32, wallet support is still limited."));
+        }
+        if (Params().GetConsensus().QuantumHeight == 0) {
+            add_address_type(OutputType::P2TSH, tr("P2TSH"), tr("P2TSH (BIP-360) output using ML-DSA signature scheme (experimental!)."));
         }
 
         // Set the button to be enabled or disabled based on whether the wallet can give out new addresses.

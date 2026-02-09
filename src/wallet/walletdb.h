@@ -82,6 +82,7 @@ extern const std::string TX;
 extern const std::string VERSION;
 extern const std::string WALLETDESCRIPTOR;
 extern const std::string WALLETDESCRIPTORCKEY;
+extern const std::string WALLETDESCRIPTORMLDSACACHE;
 extern const std::string WALLETDESCRIPTORKEY;
 extern const std::string WATCHMETA;
 extern const std::string WATCHS;
@@ -248,6 +249,7 @@ public:
     bool WriteCryptedDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const std::vector<unsigned char>& secret);
     bool WriteDescriptor(const uint256& desc_id, const WalletDescriptor& descriptor);
     bool WriteDescriptorDerivedCache(const CExtPubKey& xpub, const uint256& desc_id, uint32_t key_exp_index, uint32_t der_index);
+    bool WriteDescriptorMLDSACache(const std::vector<unsigned char>& pubkey, const uint256& desc_id, uint32_t der_index);
     bool WriteDescriptorParentCache(const CExtPubKey& xpub, const uint256& desc_id, uint32_t key_exp_index);
     bool WriteDescriptorLastHardenedCache(const CExtPubKey& xpub, const uint256& desc_id, uint32_t key_exp_index);
     bool WriteDescriptorCacheItems(const uint256& desc_id, const DescriptorCache& cache);

@@ -4,19 +4,20 @@
 
 #include <script/descriptor.h>
 
+#include <common/args.h>
+#include <crypto/mldsa.h>
 #include <hash.h>
 #include <key_io.h>
-#include <pubkey.h>
 #include <musig.h>
+#include <pubkey.h>
+#include <script/interpreter.h>
 #include <script/miniscript.h>
 #include <script/parsing.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
-#include <uint256.h>
-
-#include <common/args.h>
 #include <span.h>
+#include <uint256.h>
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/strencodings.h>
@@ -1698,6 +1699,58 @@ public:
     }
 };
 
+/** A parsed mldsa(K) descriptor. */
+class MLDsaDescriptor final : public DescriptorImpl
+{
+    const std::vector<unsigned char> m_pubkey;
+
+protected:
+    std::vector<CScript> MakeScripts(const std::vector<CPubKey>&, std::span<const CScript>, FlatSigningProvider& out) const override
+    {
+        CScript script = CScript() << m_pubkey << OP_CHECKSIG;
+        // mldsa() always commits to a single script leaf, so the script-tree Merkle root equals the leaf hash.
+        const uint256 merkle_root = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, script);
+        out.p2tsh_pubkeys.emplace(merkle_root, m_pubkey);
+        return Vector(GetScriptForDestination(WitnessV2Taproot{merkle_root}));
+    }
+
+    std::string ToStringExtra() const override { return HexStr(m_pubkey); }
+
+public:
+    explicit MLDsaDescriptor(std::vector<unsigned char> pubkey)
+        : DescriptorImpl({}, "mldsa"), m_pubkey(std::move(pubkey))
+    {
+    }
+
+    std::optional<OutputType> GetOutputType() const override { return OutputType::P2TSH; }
+    bool IsSingleType() const final { return true; }
+
+    std::optional<int64_t> ScriptSize() const override { return 1 + 1 + 32; }
+
+    std::optional<int64_t> MaxSatSize(bool) const override
+    {
+        // Script path spend with one ML-DSA signature, the tapscript leaf, and a single-byte control block.
+        const CScript tapscript = CScript() << m_pubkey << OP_CHECKSIG;
+        constexpr int64_t sig_size = mldsa::MLDSA87_SIGNATURE_SIZE + 1; // include optional sighash byte
+        constexpr int64_t control_size = 1;
+        return GetSizeOfCompactSize(sig_size) + sig_size +
+               GetSizeOfCompactSize(tapscript.size()) + tapscript.size() +
+               GetSizeOfCompactSize(control_size) + control_size;
+    }
+
+    std::optional<int64_t> MaxSatisfactionWeight(bool use_max_sig) const override
+    {
+        return MaxSatSize(use_max_sig);
+    }
+
+    std::optional<int64_t> MaxSatisfactionElems() const override { return 3; }
+
+    std::unique_ptr<DescriptorImpl> Clone() const override
+    {
+        return std::make_unique<MLDsaDescriptor>(m_pubkey);
+    }
+};
+
 ////////////////////////////////////////////////////////////////////////////
 // Parser                                                                 //
 ////////////////////////////////////////////////////////////////////////////
@@ -1710,6 +1763,37 @@ enum class ParseScriptContext {
     P2TR,    //!< Inside tr() (either internal key, or BIP342 script leaf)
     MUSIG,   //!< Inside musig() (implies P2TR, cannot have nested musig())
 };
+
+struct ParsedMLDSAKey {
+    std::vector<unsigned char> pubkey;
+};
+
+std::optional<ParsedMLDSAKey> ParseMLDSAKey(std::span<const char> key_span, std::string& error)
+{
+    std::string key_str(key_span.begin(), key_span.end());
+    if (key_str.empty()) {
+        error = "No mldsa key provided";
+        return std::nullopt;
+    }
+    if (IsSpace(key_str.front()) || IsSpace(key_str.back())) {
+        error = strprintf("mldsa key '%s' is invalid due to whitespace", key_str);
+        return std::nullopt;
+    }
+    if (!IsHex(key_str)) {
+        error = strprintf("mldsa key '%s' is not valid hex", key_str);
+        return std::nullopt;
+    }
+
+    std::vector<unsigned char> key_data = ParseHex(key_str);
+    if (key_data.size() == mldsa::MLDSA87_PUBLICKEY_SIZE) {
+        return ParsedMLDSAKey{std::move(key_data)};
+    }
+
+    error = strprintf("mldsa key has invalid size %u; expected %u-byte public key",
+                      static_cast<unsigned int>(key_data.size()),
+                      static_cast<unsigned int>(mldsa::MLDSA87_PUBLICKEY_SIZE));
+    return std::nullopt;
+}
 
 std::optional<uint32_t> ParseKeyPathNum(std::span<const char> elem, bool& apostrophe, std::string& error, bool& has_hardened)
 {
@@ -2539,6 +2623,23 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
         error = "Can only have rawtr at top level";
         return {};
     }
+    if (ctx == ParseScriptContext::TOP && Func("mldsa", expr)) {
+        auto arg = Expr(expr);
+        if (expr.size()) {
+            error = strprintf("mldsa(): only one key expected");
+            return {};
+        }
+        auto key_data = ParseMLDSAKey(arg, error);
+        if (!key_data) {
+            error = strprintf("mldsa(): %s", error);
+            return {};
+        }
+        ret.emplace_back(std::make_unique<MLDsaDescriptor>(std::move(key_data->pubkey)));
+        return ret;
+    } else if (Func("mldsa", expr)) {
+        error = "Can only have mldsa() at top level";
+        return {};
+    }
     if (ctx == ParseScriptContext::TOP && Func("raw", expr)) {
         std::string str(expr.begin(), expr.end());
         if (!IsHex(str)) {
@@ -2766,6 +2867,16 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
             }
         }
     }
+    if (txntype == TxoutType::WITNESS_V2_TAPROOT && ctx == ParseScriptContext::TOP) {
+        const uint256 merkle_root{data[0]};
+        std::vector<unsigned char> pubkey;
+        if (provider.GetP2TSHPubKey(merkle_root, pubkey)) {
+            const CScript leaf_script = CScript() << pubkey << OP_CHECKSIG;
+            if (ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf_script) == merkle_root) {
+                return std::make_unique<MLDsaDescriptor>(std::move(pubkey));
+            }
+        }
+    }
 
     if (ctx == ParseScriptContext::P2WSH || ctx == ParseScriptContext::P2TR) {
         const auto script_ctx{ctx == ParseScriptContext::P2WSH ? miniscript::MiniscriptContext::P2WSH : miniscript::MiniscriptContext::TAPSCRIPT};
@@ -2882,6 +2993,11 @@ void DescriptorCache::CacheDerivedExtPubKey(uint32_t key_exp_pos, uint32_t der_i
     xpubs[der_index] = xpub;
 }
 
+void DescriptorCache::CacheDerivedMLDSAPubKey(uint32_t der_index, std::span<const unsigned char> pubkey)
+{
+    m_derived_mldsa_pubkeys[der_index] = std::vector<unsigned char>(pubkey.begin(), pubkey.end());
+}
+
 void DescriptorCache::CacheLastHardenedExtPubKey(uint32_t key_exp_pos, const CExtPubKey& xpub)
 {
     m_last_hardened_xpubs[key_exp_pos] = xpub;
@@ -2902,6 +3018,14 @@ bool DescriptorCache::GetCachedDerivedExtPubKey(uint32_t key_exp_pos, uint32_t d
     const auto& der_it = key_exp_it->second.find(der_index);
     if (der_it == key_exp_it->second.end()) return false;
     xpub = der_it->second;
+    return true;
+}
+
+bool DescriptorCache::GetCachedDerivedMLDSAPubKey(uint32_t der_index, std::vector<unsigned char>& pubkey) const
+{
+    const auto& it = m_derived_mldsa_pubkeys.find(der_index);
+    if (it == m_derived_mldsa_pubkeys.end()) return false;
+    pubkey = it->second;
     return true;
 }
 
@@ -2940,6 +3064,17 @@ DescriptorCache DescriptorCache::MergeAndDiff(const DescriptorCache& other)
             diff.CacheDerivedExtPubKey(derived_xpub_map_pair.first, derived_xpub_pair.first, derived_xpub_pair.second);
         }
     }
+    for (const auto& [der_index, pubkey] : other.GetCachedDerivedMLDSAPubKeys()) {
+        std::vector<unsigned char> cached_pubkey;
+        if (GetCachedDerivedMLDSAPubKey(der_index, cached_pubkey)) {
+            if (cached_pubkey != pubkey) {
+                throw std::runtime_error(std::string(__func__) + ": New cached derived MLDSA pubkey does not match already cached value");
+            }
+            continue;
+        }
+        CacheDerivedMLDSAPubKey(der_index, pubkey);
+        diff.CacheDerivedMLDSAPubKey(der_index, pubkey);
+    }
     for (const auto& lh_xpub_pair : other.GetCachedLastHardenedExtPubKeys()) {
         CExtPubKey xpub;
         if (GetCachedLastHardenedExtPubKey(lh_xpub_pair.first, xpub)) {
@@ -2962,6 +3097,11 @@ ExtPubKeyMap DescriptorCache::GetCachedParentExtPubKeys() const
 std::unordered_map<uint32_t, ExtPubKeyMap> DescriptorCache::GetCachedDerivedExtPubKeys() const
 {
     return m_derived_xpubs;
+}
+
+std::unordered_map<uint32_t, std::vector<unsigned char>> DescriptorCache::GetCachedDerivedMLDSAPubKeys() const
+{
+    return m_derived_mldsa_pubkeys;
 }
 
 ExtPubKeyMap DescriptorCache::GetCachedLastHardenedExtPubKeys() const

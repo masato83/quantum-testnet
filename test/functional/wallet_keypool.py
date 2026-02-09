@@ -76,14 +76,14 @@ class KeyPoolTest(BitcoinTestFramework):
         addr = nodes[0].getnewaddress()
         addr_data = nodes[0].getaddressinfo(addr)
         assert_not_equal(addr_before_encrypting_data['hdmasterfingerprint'], addr_data['hdmasterfingerprint'])
-        assert_raises_rpc_error(-12, "Error: Keypool ran out, please call keypoolrefill first", nodes[0].getnewaddress)
+        assert_raises_rpc_error(-12, "No addresses available", nodes[0].getnewaddress)
 
-        # put six (plus 2) new keys in the keypool (100% external-, +100% internal-keys, 1 in min)
+        # put six new keys per active output type in the keypool
         with WalletUnlock(nodes[0], 'test'):
             nodes[0].keypoolrefill(6)
         wi = nodes[0].getwalletinfo()
-        assert_equal(wi['keypoolsize_hd_internal'], 24)
-        assert_equal(wi['keypoolsize'], 24)
+        assert_equal(wi['keypoolsize_hd_internal'], 30)
+        assert_equal(wi['keypoolsize'], 30)
 
         # drain the internal keys
         nodes[0].getrawchangeaddress()
@@ -96,7 +96,7 @@ class KeyPoolTest(BitcoinTestFramework):
         wi = nodes[0].getwalletinfo()
         kp_size_before = [wi['keypoolsize_hd_internal'], wi['keypoolsize']]
         # the next one should fail
-        assert_raises_rpc_error(-12, "Keypool ran out", nodes[0].getrawchangeaddress)
+        assert_raises_rpc_error(-12, "No addresses available", nodes[0].getrawchangeaddress)
         # check that keypool sizes did not change
         wi = nodes[0].getwalletinfo()
         kp_size_after = [wi['keypoolsize_hd_internal'], wi['keypoolsize']]
@@ -115,7 +115,7 @@ class KeyPoolTest(BitcoinTestFramework):
         wi = nodes[0].getwalletinfo()
         kp_size_before = [wi['keypoolsize_hd_internal'], wi['keypoolsize']]
         # the next one should fail
-        assert_raises_rpc_error(-12, "Error: Keypool ran out, please call keypoolrefill first", nodes[0].getnewaddress)
+        assert_raises_rpc_error(-12, "No addresses available", nodes[0].getnewaddress)
         # check that keypool sizes did not change
         wi = nodes[0].getwalletinfo()
         kp_size_after = [wi['keypoolsize_hd_internal'], wi['keypoolsize']]
@@ -134,13 +134,13 @@ class KeyPoolTest(BitcoinTestFramework):
         # drain the keypool
         for _ in range(3):
             nodes[0].getnewaddress()
-        assert_raises_rpc_error(-12, "Keypool ran out", nodes[0].getnewaddress)
+        assert_raises_rpc_error(-12, "No addresses available", nodes[0].getnewaddress)
 
         with WalletUnlock(nodes[0], 'test'):
             nodes[0].keypoolrefill(100)
             wi = nodes[0].getwalletinfo()
-            assert_equal(wi['keypoolsize_hd_internal'], 400)
-            assert_equal(wi['keypoolsize'], 400)
+            assert_equal(wi['keypoolsize_hd_internal'], 500)
+            assert_equal(wi['keypoolsize'], 500)
 
         # create a blank wallet
         nodes[0].createwallet(wallet_name='w2', blank=True, disable_private_keys=True)

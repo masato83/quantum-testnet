@@ -56,6 +56,7 @@ const std::string VERSION{"version"};
 const std::string WALLETDESCRIPTOR{"walletdescriptor"};
 const std::string WALLETDESCRIPTORCACHE{"walletdescriptorcache"};
 const std::string WALLETDESCRIPTORLHCACHE{"walletdescriptorlhcache"};
+const std::string WALLETDESCRIPTORMLDSACACHE{"walletdescriptormldsacache"};
 const std::string WALLETDESCRIPTORCKEY{"walletdescriptorckey"};
 const std::string WALLETDESCRIPTORKEY{"walletdescriptorkey"};
 const std::string WATCHMETA{"watchmeta"};
@@ -249,6 +250,11 @@ bool WalletBatch::WriteDescriptorDerivedCache(const CExtPubKey& xpub, const uint
     return WriteIC(std::make_pair(std::make_pair(DBKeys::WALLETDESCRIPTORCACHE, desc_id), std::make_pair(key_exp_index, der_index)), ser_xpub);
 }
 
+bool WalletBatch::WriteDescriptorMLDSACache(const std::vector<unsigned char>& pubkey, const uint256& desc_id, uint32_t der_index)
+{
+    return WriteIC(std::make_pair(std::make_pair(DBKeys::WALLETDESCRIPTORMLDSACACHE, desc_id), der_index), pubkey);
+}
+
 bool WalletBatch::WriteDescriptorParentCache(const CExtPubKey& xpub, const uint256& desc_id, uint32_t key_exp_index)
 {
     std::vector<unsigned char> ser_xpub(BIP32_EXTKEY_SIZE);
@@ -275,6 +281,11 @@ bool WalletBatch::WriteDescriptorCacheItems(const uint256& desc_id, const Descri
             if (!WriteDescriptorDerivedCache(derived_xpub_pair.second, desc_id, derived_xpub_map_pair.first, derived_xpub_pair.first)) {
                 return false;
             }
+        }
+    }
+    for (const auto& [der_index, pubkey] : cache.GetCachedDerivedMLDSAPubKeys()) {
+        if (!WriteDescriptorMLDSACache(pubkey, desc_id, der_index)) {
+            return false;
         }
     }
     for (const auto& lh_xpub_pair : cache.GetCachedLastHardenedExtPubKeys()) {
@@ -828,6 +839,23 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
             return DBErrors::LOAD_OK;
         });
         result = std::max(result, key_cache_res.m_result);
+
+        // Get MLDSA key cache for this descriptor
+        prefix = PrefixStream(DBKeys::WALLETDESCRIPTORMLDSACACHE, id);
+        LoadResult mldsa_cache_res = LoadRecords(pwallet, batch, DBKeys::WALLETDESCRIPTORMLDSACACHE, prefix,
+                                                 [&id, &cache](CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) {
+                                                     uint256 desc_id;
+                                                     uint32_t der_index;
+                                                     key >> desc_id;
+                                                     assert(desc_id == id);
+                                                     key >> der_index;
+
+                                                     std::vector<unsigned char> pubkey;
+                                                     value >> pubkey;
+                                                     cache.CacheDerivedMLDSAPubKey(der_index, pubkey);
+                                                     return DBErrors::LOAD_OK;
+                                                 });
+        result = std::max(result, mldsa_cache_res.m_result);
 
         // Get last hardened cache for this descriptor
         prefix = PrefixStream(DBKeys::WALLETDESCRIPTORLHCACHE, id);

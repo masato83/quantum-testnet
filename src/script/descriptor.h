@@ -11,6 +11,7 @@
 #include <script/signingprovider.h>
 
 #include <optional>
+#include <span>
 #include <vector>
 
 using ExtPubKeyMap = std::unordered_map<uint32_t, CExtPubKey>;
@@ -20,6 +21,8 @@ class DescriptorCache {
 private:
     /** Map key expression index -> map of (key derivation index -> xpub) */
     std::unordered_map<uint32_t, ExtPubKeyMap> m_derived_xpubs;
+    /** Map derivation index -> MLDSA pubkey bytes. */
+    std::unordered_map<uint32_t, std::vector<unsigned char>> m_derived_mldsa_pubkeys;
     /** Map key expression index -> parent xpub */
     ExtPubKeyMap m_parent_xpubs;
     /** Map key expression index -> last hardened xpub */
@@ -52,6 +55,10 @@ public:
      * @param[out] xpub The CExtPubKey to get from cache
      */
     bool GetCachedDerivedExtPubKey(uint32_t key_exp_pos, uint32_t der_index, CExtPubKey& xpub) const;
+    /** Cache an MLDSA pubkey derived at an index. */
+    void CacheDerivedMLDSAPubKey(uint32_t der_index, std::span<const unsigned char> pubkey);
+    /** Retrieve a cached MLDSA pubkey derived at an index. */
+    bool GetCachedDerivedMLDSAPubKey(uint32_t der_index, std::vector<unsigned char>& pubkey) const;
     /** Cache a last hardened xpub
      *
      * @param[in] key_exp_pos Position of the key expression within the descriptor
@@ -69,6 +76,8 @@ public:
     ExtPubKeyMap GetCachedParentExtPubKeys() const;
     /** Retrieve all cached derived xpubs */
     std::unordered_map<uint32_t, ExtPubKeyMap> GetCachedDerivedExtPubKeys() const;
+    /** Retrieve all cached derived MLDSA pubkeys */
+    std::unordered_map<uint32_t, std::vector<unsigned char>> GetCachedDerivedMLDSAPubKeys() const;
     /** Retrieve all cached last hardened xpubs */
     ExtPubKeyMap GetCachedLastHardenedExtPubKeys() const;
 

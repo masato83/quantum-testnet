@@ -8,6 +8,7 @@
 #include <node/types.h>
 #include <policy/policy.h>
 #include <script/signingprovider.h>
+#include <script/solver.h>
 #include <util/check.h>
 #include <util/strencodings.h>
 
@@ -344,10 +345,16 @@ bool PSBTInputSignedAndVerified(const PartiallySignedTransaction& psbt, unsigned
         return false;
     }
 
+    script_verify_flags verify_flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    std::vector<std::vector<unsigned char>> script_solutions;
+    if (Solver(utxo.scriptPubKey, script_solutions) == TxoutType::WITNESS_V2_TAPROOT) {
+        verify_flags |= SCRIPT_VERIFY_QUANTUM;
+    }
+
     if (txdata) {
-        return VerifyScript(input.final_script_sig, utxo.scriptPubKey, &input.final_script_witness, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker{&(*psbt.tx), input_index, utxo.nValue, *txdata, MissingDataBehavior::FAIL});
+        return VerifyScript(input.final_script_sig, utxo.scriptPubKey, &input.final_script_witness, verify_flags, MutableTransactionSignatureChecker{&(*psbt.tx), input_index, utxo.nValue, *txdata, MissingDataBehavior::FAIL});
     } else {
-        return VerifyScript(input.final_script_sig, utxo.scriptPubKey, &input.final_script_witness, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker{&(*psbt.tx), input_index, utxo.nValue, MissingDataBehavior::FAIL});
+        return VerifyScript(input.final_script_sig, utxo.scriptPubKey, &input.final_script_witness, verify_flags, MutableTransactionSignatureChecker{&(*psbt.tx), input_index, utxo.nValue, MissingDataBehavior::FAIL});
     }
 }
 

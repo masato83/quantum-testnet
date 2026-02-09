@@ -527,7 +527,15 @@ RPCHelpMan listdescriptors()
         LOCK(desc_spk_man->cs_desc_man);
         const auto& wallet_descriptor = desc_spk_man->GetWalletDescriptor();
         std::string descriptor;
-        CHECK_NONFATAL(desc_spk_man->GetDescriptorString(descriptor, priv));
+        // Some descriptor types (e.g. mldsa() / P2TSH) are public-only, so
+        // requesting private descriptors may legitimately fall back to a public
+        // descriptor string.
+        const bool has_private_descriptor = desc_spk_man->GetDescriptorString(descriptor, priv);
+        if (!priv) {
+            CHECK_NONFATAL(has_private_descriptor);
+        } else {
+            CHECK_NONFATAL(has_private_descriptor || !descriptor.empty());
+        }
         const bool is_range = wallet_descriptor.descriptor->IsRange();
         wallet_descriptors.push_back({
             descriptor,

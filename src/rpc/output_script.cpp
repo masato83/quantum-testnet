@@ -137,6 +137,8 @@ static RPCHelpMan createmultisig()
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, tfm::format("Unknown address type '%s'", address_type));
             } else if (output_type.value() == OutputType::BECH32M) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "createmultisig cannot create bech32m multisig addresses");
+            } else if (output_type.value() == OutputType::P2TSH) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "createmultisig cannot create p2tsh multisig addresses");
             }
 
             FlatSigningProvider keystore;

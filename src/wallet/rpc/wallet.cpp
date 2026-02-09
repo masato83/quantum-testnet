@@ -817,7 +817,15 @@ static RPCHelpMan createwalletdescriptor()
             std::vector<std::reference_wrapper<DescriptorScriptPubKeyMan>> spkms;
             WalletBatch batch{pwallet->GetDatabase()};
             for (bool internal : internals) {
-                WalletDescriptor w_desc = GenerateWalletDescriptor(xpub, *output_type, internal);
+                std::optional<std::vector<unsigned char>> mldsa_pubkey;
+                if (*output_type == OutputType::P2TSH) {
+                    std::vector<unsigned char> mldsa_seckey;
+                    mldsa_pubkey.emplace();
+                    if (!DeriveWalletMLDSAKey(active_hdkey.key, internal, *mldsa_pubkey, mldsa_seckey)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to derive MLDSA key");
+                    }
+                }
+                WalletDescriptor w_desc = GenerateWalletDescriptor(xpub, *output_type, internal, mldsa_pubkey);
                 uint256 w_id = DescriptorID(*w_desc.descriptor);
                 if (!pwallet->GetScriptPubKeyMan(w_id)) {
                     spkms.emplace_back(pwallet->SetupDescriptorScriptPubKeyMan(batch, active_hdkey, *output_type, internal));

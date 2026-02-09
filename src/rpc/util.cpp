@@ -326,6 +326,16 @@ public:
         return obj;
     }
 
+    UniValue operator()(const WitnessV2Taproot& tap) const
+    {
+        UniValue obj(UniValue::VOBJ);
+        obj.pushKV("isscript", true);
+        obj.pushKV("iswitness", true);
+        obj.pushKV("witness_version", 2);
+        obj.pushKV("witness_program", HexStr(tap));
+        return obj;
+    }
+
     UniValue operator()(const PayToAnchor& anchor) const
     {
         UniValue obj(UniValue::VOBJ);

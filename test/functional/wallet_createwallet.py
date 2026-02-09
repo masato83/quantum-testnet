@@ -143,9 +143,9 @@ class CreateWalletTest(BitcoinTestFramework):
         with WalletUnlock(w6, "thisisapassphrase"):
             w6.signmessage(w6.getnewaddress('', 'legacy'), "test")
             w6.keypoolrefill(1)
-            # There should only be 1 key for legacy, 3 for descriptors
+            # There should only be 1 key for legacy, 4 for descriptors (including p2tsh)
             walletinfo = w6.getwalletinfo()
-            keys = 4
+            keys = 5
             assert_equal(walletinfo['keypoolsize'], keys)
             assert_equal(walletinfo['keypoolsize_hd_internal'], keys)
         # Allow empty passphrase, but there should be a warning

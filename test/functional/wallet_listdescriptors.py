@@ -41,13 +41,15 @@ class ListDescriptorsTest(BitcoinTestFramework):
         node.createwallet(wallet_name='w3')
         result = node.get_wallet_rpc('w3').listdescriptors()
         assert_equal("w3", result['wallet_name'])
-        assert_equal(8, len(result['descriptors']))
-        assert_equal(8, len([d for d in result['descriptors'] if d['active']]))
-        assert_equal(4, len([d for d in result['descriptors'] if d['internal']]))
+        assert_equal(10, len(result['descriptors']))
+        assert_equal(10, len([d for d in result['descriptors'] if d['active']]))
+        assert_equal(5, len([d for d in result['descriptors'] if d['internal']]))
         for item in result['descriptors']:
             assert_not_equal(item['desc'], '')
-            assert item['next_index'] == 0
-            assert item['range'] == [0, 0]
+            if 'next_index' in item:
+                assert item['next_index'] == 0
+            if 'range' in item:
+                assert item['range'] == [0, 0]
             assert item['timestamp'] is not None
 
         self.log.info('Test that descriptor strings are returned in lexicographically sorted order.')

@@ -165,6 +165,8 @@ public:
     virtual bool GetKeyOrigin(const CKeyID& keyid, KeyOriginInfo& info) const { return false; }
     virtual bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const { return false; }
     virtual bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const { return false; }
+    virtual bool GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const { return false; }
+    virtual bool GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const { return false; }
     virtual std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const { return {}; }
     virtual std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const {return {}; }
     virtual void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const {}
@@ -213,6 +215,8 @@ public:
     bool GetKeyOrigin(const CKeyID& keyid, KeyOriginInfo& info) const override;
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
+    bool GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const override;
+    bool GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const override;
     std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const override;
     std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const override;
     void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const override;
@@ -226,6 +230,8 @@ struct FlatSigningProvider final : public SigningProvider
     std::map<CKeyID, CPubKey> pubkeys;
     std::map<CKeyID, std::pair<CPubKey, KeyOriginInfo>> origins;
     std::map<CKeyID, CKey> keys;
+    std::map<uint256, std::vector<unsigned char>> p2tsh_pubkeys;                 /** Mapping from P2TSH merkle root to MLDSA public key. */
+    std::map<std::vector<unsigned char>, std::vector<unsigned char>> mldsa_keys; /** Mapping from MLDSA public key to MLDSA private key. */
     std::map<XOnlyPubKey, TaprootBuilder> tr_trees; /** Map from output key to Taproot tree (which can then make the TaprootSpendData */
     std::map<CPubKey, std::vector<CPubKey>> aggregate_pubkeys; /** MuSig2 aggregate pubkeys */
     std::map<uint256, MuSig2SecNonce>* musig2_secnonces{nullptr};
@@ -237,6 +243,8 @@ struct FlatSigningProvider final : public SigningProvider
     bool GetKey(const CKeyID& keyid, CKey& key) const override;
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
+    bool GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const override;
+    bool GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const override;
     std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const override;
     std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const override;
     void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const override;
@@ -335,6 +343,8 @@ public:
     bool GetKey(const CKeyID& keyid, CKey& key) const override;
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
+    bool GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const override;
+    bool GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const override;
 };
 
 #endif // BITCOIN_SCRIPT_SIGNINGPROVIDER_H

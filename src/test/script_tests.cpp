@@ -7,6 +7,7 @@
 #include <crypto/mldsa.h>
 #include <key.h>
 #include <rpc/util.h>
+#include <script/descriptor.h>
 #include <script/interpreter.h>
 #include <script/script.h>
 #include <script/script_error.h>
@@ -1965,6 +1966,82 @@ BOOST_AUTO_TEST_CASE(mldsa_tapscript)
     std::vector<unsigned char> sig_bad = sig_ok;
     sig_bad[0] ^= 0x01;
     RunCase("mldsa tapscript wrong signature", sig_bad, SCRIPT_ERR_SCHNORR_SIG, /*expect_valid=*/false);
+}
+
+BOOST_AUTO_TEST_CASE(mldsa_descriptor_roundtrip)
+{
+    const CAmount amount{1000};
+    std::array<unsigned char, mldsa::MLDSA_SEED_SIZE> seed{};
+    seed.fill(0x42);
+    std::array<unsigned char, mldsa::MLDSA87_PUBLICKEY_SIZE> pk{};
+    std::array<unsigned char, mldsa::MLDSA87_SECRETKEY_SIZE> sk{};
+    BOOST_REQUIRE(mldsa::KeypairFromSeed(seed, pk, sk));
+
+    const std::string desc_str = "mldsa(" + HexStr(pk) + ")";
+    FlatSigningProvider keys;
+    std::string error;
+    auto descs = Parse(desc_str, keys, error, /*require_checksum=*/false);
+    BOOST_REQUIRE_MESSAGE(!descs.empty(), error);
+
+    std::vector<CScript> output_scripts;
+    FlatSigningProvider out;
+    BOOST_REQUIRE(descs[0]->Expand(0, DUMMY_SIGNING_PROVIDER, output_scripts, out));
+    BOOST_REQUIRE_EQUAL(output_scripts.size(), 1U);
+    const CScript& script_pubkey = output_scripts[0];
+
+    const CScript leaf_script = CScript() << std::vector<unsigned char>(pk.begin(), pk.end()) << OP_CHECKSIG;
+    const uint256 tapleaf_hash = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, std::span<const unsigned char>{leaf_script});
+
+    CMutableTransaction tx_credit = BuildCreditingTransaction(script_pubkey, amount);
+    CMutableTransaction tx_spend = BuildSpendingTransaction(CScript(), CScriptWitness(), CTransaction(tx_credit));
+    const CTransaction tx_spend_const{tx_spend};
+
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx_spend_const, std::vector<CTxOut>{tx_credit.vout[0]}, true);
+
+    ScriptExecutionData execdata;
+    execdata.m_annex_init = true;
+    execdata.m_annex_present = false;
+    execdata.m_tapleaf_hash = tapleaf_hash;
+    execdata.m_tapleaf_hash_init = true;
+    execdata.m_codeseparator_pos = 0xFFFFFFFF;
+    execdata.m_codeseparator_pos_init = true;
+
+    uint256 sighash;
+    BOOST_REQUIRE(SignatureHashSchnorr(sighash, execdata, tx_spend_const, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL));
+
+    std::array<unsigned char, mldsa::MLDSA87_SIGNATURE_SIZE> sig{};
+    const std::span<const unsigned char> msg{sighash.begin(), uint256::size()};
+    BOOST_REQUIRE(mldsa::SignDeterministic(msg, {}, sk, sig));
+    std::vector<unsigned char> sig_ok(sig.begin(), sig.end());
+
+    const std::vector<unsigned char> control{0xc1}; // single-leaf P2TSH control block
+
+    auto VerifyWitness = [&](const std::vector<unsigned char>& sig_bytes, ScriptError_t expected_error, bool expect_valid) {
+        CScriptWitness witness;
+        witness.stack.push_back(sig_bytes);
+        witness.stack.push_back(ToByteVector(leaf_script));
+        witness.stack.push_back(control);
+        tx_spend.vin[0].scriptWitness = witness;
+
+        ScriptError err = SCRIPT_ERR_UNKNOWN_ERROR;
+        const bool ok = VerifyScript(tx_spend.vin[0].scriptSig, tx_credit.vout[0].scriptPubKey, &tx_spend.vin[0].scriptWitness,
+                                     SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+                                     TransactionSignatureChecker(&tx_spend_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL),
+                                     &err);
+        BOOST_CHECK_EQUAL(ok, expect_valid);
+        BOOST_CHECK_EQUAL(err, expected_error);
+    };
+
+    VerifyWitness(sig_ok, SCRIPT_ERR_OK, /*expect_valid=*/true);
+
+    std::vector<unsigned char> sig_bad0 = sig_ok;
+    sig_bad0[0] ^= 0x01;
+    VerifyWitness(sig_bad0, SCRIPT_ERR_SCHNORR_SIG, /*expect_valid=*/false);
+
+    std::vector<unsigned char> sig_bad1 = sig_ok;
+    sig_bad1[sig_bad1.size() / 2] ^= 0x80;
+    VerifyWitness(sig_bad1, SCRIPT_ERR_SCHNORR_SIG, /*expect_valid=*/false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

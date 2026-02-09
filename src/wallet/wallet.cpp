@@ -2263,6 +2263,7 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
     }
 
     bool any_tr{false};
+    bool any_tsh{false};
     bool any_wpkh{false};
     bool any_sh{false};
     bool any_pkh{false};
@@ -2270,6 +2271,8 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
     for (const auto& recipient : vecSend) {
         if (std::get_if<WitnessV1Taproot>(&recipient.dest)) {
             any_tr = true;
+        } else if (std::get_if<WitnessV2Taproot>(&recipient.dest)) {
+            any_tsh = true;
         } else if (std::get_if<WitnessV0KeyHash>(&recipient.dest)) {
             any_wpkh = true;
         } else if (std::get_if<ScriptHash>(&recipient.dest)) {
@@ -2283,6 +2286,11 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
     if (has_bech32m_spkman && any_tr) {
         // Currently tr is the only type supported by the BECH32M spkman
         return OutputType::BECH32M;
+    }
+    const bool has_p2tsh_spkman(GetScriptPubKeyMan(OutputType::P2TSH, /*internal=*/true));
+    if (has_p2tsh_spkman && any_tsh) {
+        // Currently tsh is the only type supported by the P2TSH spkman
+        return OutputType::P2TSH;
     }
     const bool has_bech32_spkman(GetScriptPubKeyMan(OutputType::BECH32, /*internal=*/true));
     if (has_bech32_spkman && any_wpkh) {
@@ -2303,6 +2311,9 @@ OutputType CWallet::TransactionChangeType(const std::optional<OutputType>& chang
 
     if (has_bech32m_spkman) {
         return OutputType::BECH32M;
+    }
+    if (has_p2tsh_spkman) {
+        return OutputType::P2TSH;
     }
     if (has_bech32_spkman) {
         return OutputType::BECH32;
@@ -3713,6 +3724,9 @@ void CWallet::LoadActiveScriptPubKeyMan(uint256 id, OutputType type, bool intern
     auto& spk_mans = internal ? m_internal_spk_managers : m_external_spk_managers;
     auto& spk_mans_other = internal ? m_external_spk_managers : m_internal_spk_managers;
     auto spk_man = m_spk_managers.at(id).get();
+    if (auto* desc_spk_man = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man)) {
+        desc_spk_man->SetInternalChain(internal);
+    }
     spk_mans[type] = spk_man;
 
     const auto it = spk_mans_other.find(type);

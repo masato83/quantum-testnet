@@ -87,6 +87,7 @@ Descriptors consist of several types of expressions. The top level expression is
 - `multi_a(k,KEY_1,KEY_2,...,KEY_N)` (only inside `tr`): k-of-n multisig script using OP_CHECKSIG, OP_CHECKSIGADD, and OP_NUMEQUAL.
 - `sortedmulti_a(k,KEY_1,KEY_2,...,KEY_N)` (only inside `tr`): similar to `multi_a`, but the (x-only) public keys in it will be sorted lexicographically.
 - `tr(KEY)` or `tr(KEY,TREE)` (top level only): P2TR output with the specified key as internal key, and optionally a tree of script paths.
+- `mldsa(MLDSA_KEY)` (top level only): P2TSH output with a single `<MLDSA-KEY> OP_CHECKSIG` script leaf.
 - `addr(ADDR)` (top level only): the script which ADDR expands to.
 - `raw(HEX)` (top level only): the script whose hex encoding is HEX.
 - `rawtr(KEY)` (top level only): P2TR output with the specified key as output key. NOTE: while it's possible to use this to construct wallets, it has several downsides, like being unable to prove no hidden script path exists. Use at your own risk.
@@ -118,6 +119,8 @@ Descriptors consist of several types of expressions. The top level expression is
 - P2PKH addresses (base58, of the form `1...` for mainnet or `[nm]...` for testnet). Note that P2PKH addresses in descriptors cannot be used for P2PK outputs (use the `pk` function instead).
 - P2SH addresses (base58, of the form `3...` for mainnet or `2...` for testnet, defined in [BIP 13](https://github.com/bitcoin/bips/blob/master/bip-0013.mediawiki)).
 - Segwit addresses (bech32 and bech32m, of the form `bc1...` for mainnet or `tb1...` for testnet, defined in [BIP 173](https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki) and [BIP 350](https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki)).
+
+`MLDSA_KEY` expressions: ML-DSA-87 public key
 
 ## Explanation
 

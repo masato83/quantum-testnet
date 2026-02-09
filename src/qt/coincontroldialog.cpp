@@ -3,18 +3,19 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qt/coincontroldialog.h>
-#include <qt/forms/ui_coincontroldialog.h>
 
+#include <crypto/mldsa.h>
+#include <interfaces/node.h>
+#include <key_io.h>
+#include <policy/policy.h>
 #include <qt/addresstablemodel.h>
 #include <qt/bitcoinunits.h>
+#include <qt/forms/ui_coincontroldialog.h>
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/walletmodel.h>
-
-#include <interfaces/node.h>
-#include <key_io.h>
-#include <policy/policy.h>
+#include <script/script.h>
 #include <wallet/coincontrol.h>
 #include <wallet/coinselection.h>
 #include <wallet/wallet.h>
@@ -422,6 +423,17 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
             } else if (witnessversion == 1) { // P2TR key-path spend
                 // 1 WU (witness item count) + 65 WU (Schnorr signature with len byte)
                 nBytesInputs += 66 / WITNESS_SCALE_FACTOR;
+            } else if (witnessversion == 2) { // P2TSH script-path spend
+                // Script path stack without item-count byte:
+                // [MLDSA sig, tapscript leaf, control block]
+                const CScript tapscript = CScript() << std::vector<unsigned char>(mldsa::MLDSA87_PUBLICKEY_SIZE, 0) << OP_CHECKSIG;
+                const size_t sig_size = mldsa::MLDSA87_SIGNATURE_SIZE + 1; // optional sighash byte
+                const size_t control_size = 1;
+                const size_t witness_size =
+                    GetSizeOfCompactSize(sig_size) + sig_size +
+                    GetSizeOfCompactSize(tapscript.size()) + tapscript.size() +
+                    GetSizeOfCompactSize(control_size) + control_size;
+                nBytesInputs += witness_size / WITNESS_SCALE_FACTOR;
             } else {
                 // not supported, should be unreachable
                 throw std::runtime_error("Trying to spend future segwit version script");

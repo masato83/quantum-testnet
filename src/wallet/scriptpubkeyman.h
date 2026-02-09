@@ -293,6 +293,8 @@ private:
 
     //! Number of pre-generated keys/scripts (part of the look-ahead process, used to detect payments)
     int64_t m_keypool_size GUARDED_BY(cs_desc_man){DEFAULT_KEYPOOL_SIZE};
+    //! Whether this manager is used for internal/change addresses.
+    std::optional<bool> m_internal_chain GUARDED_BY(cs_desc_man);
 
     /** Map of a session id to MuSig2 secnonce
      *
@@ -317,6 +319,8 @@ private:
     std::unique_ptr<FlatSigningProvider> GetSigningProvider(const CScript& script, bool include_private = false) const;
     // Fetch the SigningProvider for a given index and optionally include private keys. Called by the above functions.
     std::unique_ptr<FlatSigningProvider> GetSigningProvider(int32_t index, bool include_private = false) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);
+    bool ExpandP2TSHFromCache(int32_t index, std::vector<CScript>& scripts_temp, FlatSigningProvider& out_keys) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);
+    bool DeriveP2TSHKey(int32_t index, bool internal, std::vector<unsigned char>& pubkey, std::vector<unsigned char>* seckey = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);
 
 protected:
     WalletDescriptor m_wallet_descriptor GUARDED_BY(cs_desc_man);
@@ -358,6 +362,7 @@ public:
 
     //! Setup descriptors based on the given CExtkey
     bool SetupDescriptorGeneration(WalletBatch& batch, const CExtKey& master_key, OutputType addr_type, bool internal);
+    void SetInternalChain(bool internal);
 
     bool HavePrivateKeys() const override;
     bool HasPrivKey(const CKeyID& keyid) const EXCLUSIVE_LOCKS_REQUIRED(cs_desc_man);

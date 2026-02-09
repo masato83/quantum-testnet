@@ -52,6 +52,15 @@ bool HidingSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tap
 {
     return m_provider->GetTaprootBuilder(output_key, builder);
 }
+bool HidingSigningProvider::GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const
+{
+    return m_provider->GetP2TSHPubKey(merkle_root, pubkey);
+}
+bool HidingSigningProvider::GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const
+{
+    if (m_hide_secret) return false;
+    return m_provider->GetMLDSAKey(pubkey, seckey);
+}
 std::vector<CPubKey> HidingSigningProvider::GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const
 {
     if (m_hide_origin) return {};
@@ -106,6 +115,14 @@ bool FlatSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tapro
 {
     return LookupHelper(tr_trees, output_key, builder);
 }
+bool FlatSigningProvider::GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const
+{
+    return LookupHelper(p2tsh_pubkeys, merkle_root, pubkey);
+}
+bool FlatSigningProvider::GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const
+{
+    return LookupHelper(mldsa_keys, std::vector<unsigned char>(pubkey.begin(), pubkey.end()), seckey);
+}
 
 std::vector<CPubKey> FlatSigningProvider::GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const
 {
@@ -146,6 +163,8 @@ FlatSigningProvider& FlatSigningProvider::Merge(FlatSigningProvider&& b)
     scripts.merge(b.scripts);
     pubkeys.merge(b.pubkeys);
     keys.merge(b.keys);
+    p2tsh_pubkeys.merge(b.p2tsh_pubkeys);
+    mldsa_keys.merge(b.mldsa_keys);
     origins.merge(b.origins);
     tr_trees.merge(b.tr_trees);
     aggregate_pubkeys.merge(b.aggregate_pubkeys);
@@ -345,6 +364,22 @@ bool MultiSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tapr
 {
     for (const auto& provider: m_providers) {
         if (provider->GetTaprootBuilder(output_key, builder)) return true;
+    }
+    return false;
+}
+
+bool MultiSigningProvider::GetP2TSHPubKey(const uint256& merkle_root, std::vector<unsigned char>& pubkey) const
+{
+    for (const auto& provider : m_providers) {
+        if (provider->GetP2TSHPubKey(merkle_root, pubkey)) return true;
+    }
+    return false;
+}
+
+bool MultiSigningProvider::GetMLDSAKey(std::span<const unsigned char> pubkey, std::vector<unsigned char>& seckey) const
+{
+    for (const auto& provider : m_providers) {
+        if (provider->GetMLDSAKey(pubkey, seckey)) return true;
     }
     return false;
 }

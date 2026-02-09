@@ -6,6 +6,7 @@
 #include <script/sign.h>
 
 #include <consensus/amount.h>
+#include <crypto/mldsa.h>
 #include <key.h>
 #include <musig.h>
 #include <policy/policy.h>
@@ -96,6 +97,23 @@ bool MutableTransactionSignatureCreator::CreateSchnorrSig(const SigningProvider&
     sig.resize(64);
     // Use uint256{} as aux_rnd for now.
     if (!key.SignSchnorr(*hash, sig, merkle_root, {})) return false;
+    if (nHashType) sig.push_back(nHashType);
+    return true;
+}
+
+bool MutableTransactionSignatureCreator::CreateMLDSASig(const SigningProvider& provider, std::vector<unsigned char>& sig, std::span<const unsigned char> pubkey, const uint256* leaf_hash, SigVersion sigversion) const
+{
+    if (pubkey.size() != mldsa::MLDSA87_PUBLICKEY_SIZE) return false;
+
+    std::vector<unsigned char> seckey;
+    if (!provider.GetMLDSAKey(pubkey, seckey)) return false;
+
+    std::optional<uint256> hash = ComputeSchnorrSignatureHash(leaf_hash, sigversion);
+    if (!hash.has_value()) return false;
+
+    sig.assign(mldsa::MLDSA87_SIGNATURE_SIZE, 0);
+    const std::span<const unsigned char> msg{hash->begin(), uint256::size()};
+    if (!mldsa::SignDeterministic(msg, {}, seckey, sig)) return false;
     if (nHashType) sig.push_back(nHashType);
     return true;
 }
@@ -703,6 +721,22 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
     case TxoutType::WITNESS_V1_TAPROOT:
         return SignTaproot(provider, creator, WitnessV1Taproot(XOnlyPubKey{vSolutions[0]}), sigdata, ret);
 
+    case TxoutType::WITNESS_V2_TAPROOT: {
+        const uint256 merkle_root(vSolutions[0]);
+        std::vector<unsigned char> pubkey;
+        if (!provider.GetP2TSHPubKey(merkle_root, pubkey)) return false;
+
+        CScript leaf_script = CScript() << pubkey << OP_CHECKSIG;
+        const uint256 leaf_hash = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+        if (leaf_hash != merkle_root) return false;
+
+        if (!creator.CreateMLDSASig(provider, sig, pubkey, &leaf_hash, SigVersion::TAPSCRIPT)) return false;
+        ret.push_back(std::move(sig));
+        ret.emplace_back(leaf_script.begin(), leaf_script.end());
+        ret.push_back(std::vector<unsigned char>{TAPROOT_LEAF_TAPSCRIPT | 1});
+        return true;
+    }
+
     case TxoutType::ANCHOR:
         return true;
     } // no default case, so the compiler can warn about missing cases
@@ -785,6 +819,12 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
             sigdata.scriptWitness.stack = std::move(result);
         }
         result.clear();
+    } else if (whichType == TxoutType::WITNESS_V2_TAPROOT && !P2SH) {
+        sigdata.witness = true;
+        if (solved) {
+            sigdata.scriptWitness.stack = std::move(result);
+        }
+        result.clear();
     } else if (solved && whichType == TxoutType::WITNESS_UNKNOWN) {
         sigdata.witness = true;
     }
@@ -795,8 +835,9 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
     }
     sigdata.scriptSig = PushAll(result);
 
-    // Test solution
-    sigdata.complete = solved && VerifyScript(sigdata.scriptSig, fromPubKey, &sigdata.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, creator.Checker());
+    // Test solution. Quantum validation is required to consider v2 tapscript signatures complete.
+    const auto verify_flags = whichType == TxoutType::WITNESS_V2_TAPROOT ? STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_QUANTUM : STANDARD_SCRIPT_VERIFY_FLAGS;
+    sigdata.complete = solved && VerifyScript(sigdata.scriptSig, fromPubKey, &sigdata.scriptWitness, verify_flags, creator.Checker());
     return sigdata.complete;
 }
 
@@ -964,6 +1005,11 @@ public:
         sig.assign(64, '\000');
         return true;
     }
+    bool CreateMLDSASig(const SigningProvider& provider, std::vector<unsigned char>& sig, std::span<const unsigned char> pubkey, const uint256* leaf_hash, SigVersion sigversion) const override
+    {
+        sig.assign(mldsa::MLDSA87_SIGNATURE_SIZE, '\000');
+        return true;
+    }
     std::vector<uint8_t> CreateMuSig2Nonce(const SigningProvider& provider, const CPubKey& aggregate_pubkey, const CPubKey& script_pubkey, const CPubKey& part_pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion, const SignatureData& sigdata) const override
     {
         std::vector<uint8_t> out;
@@ -1055,8 +1101,17 @@ bool SignTransaction(CMutableTransaction& mtx, const SigningProvider* keystore, 
             continue;
         }
 
+        // P2TSH signatures are only meaningful under QUANTUM validation; without it, standard
+        // flags may reject the program as an upgradable witness version and prevent partial
+        // signing across providers (e.g. when spending receive+change together).
+        script_verify_flags verify_flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+        std::vector<std::vector<uint8_t>> script_solutions;
+        if (Solver(prevPubKey, script_solutions) == TxoutType::WITNESS_V2_TAPROOT) {
+            verify_flags |= SCRIPT_VERIFY_QUANTUM;
+        }
+
         ScriptError serror = SCRIPT_ERR_OK;
-        if (!sigdata.complete && !VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txConst, i, amount, txdata, MissingDataBehavior::FAIL), &serror)) {
+        if (!sigdata.complete && !VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, verify_flags, TransactionSignatureChecker(&txConst, i, amount, txdata, MissingDataBehavior::FAIL), &serror)) {
             if (serror == SCRIPT_ERR_INVALID_STACK_OPERATION) {
                 // Unable to sign input and verification failed (possible attempt to partially sign).
                 input_errors[i] = Untranslated("Unable to sign input, invalid stack size (possibly missing key)");

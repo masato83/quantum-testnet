@@ -1527,7 +1527,12 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         self.nodes[0].createwallet(wallet_name="grind_watchonly", disable_private_keys=True)
         watchonly = self.nodes[0].get_wallet_rpc("grind_watchonly")
-        assert_equal(watchonly.importdescriptors(wallet.listdescriptors()["descriptors"])[0]["success"], True)
+        ranged_active_descs = [
+            desc for desc in wallet.listdescriptors()["descriptors"]
+            if desc.get("active") and "range" in desc
+        ]
+        for result in watchonly.importdescriptors(ranged_active_descs):
+            assert_equal(result["success"], True)
 
         # Send to legacy address type so that we will have an ecdsa signature with a measurable effect on the feerate
         default_wallet.sendtoaddress(wallet.getnewaddress(address_type="legacy"), 10)

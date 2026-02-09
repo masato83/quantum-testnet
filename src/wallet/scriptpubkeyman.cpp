@@ -2,12 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <wallet/scriptpubkeyman.h>
+
 #include <hash.h>
 #include <key_io.h>
 #include <logging.h>
 #include <node/types.h>
 #include <outputtype.h>
 #include <script/descriptor.h>
+#include <script/interpreter.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/solver.h>
@@ -17,7 +20,6 @@
 #include <util/string.h>
 #include <util/time.h>
 #include <util/translation.h>
-#include <wallet/scriptpubkeyman.h>
 
 #include <optional>
 
@@ -94,6 +96,7 @@ IsMineResult LegacyWalletIsMineInnerDONOTUSE(const LegacyDataSPKM& keystore, con
     case TxoutType::NULL_DATA:
     case TxoutType::WITNESS_UNKNOWN:
     case TxoutType::WITNESS_V1_TAPROOT:
+    case TxoutType::WITNESS_V2_TAPROOT:
     case TxoutType::ANCHOR:
         break;
     case TxoutType::PUBKEY:
@@ -823,10 +826,6 @@ bool LegacyDataSPKM::DeleteRecordsWithDB(WalletBatch& batch)
 
 util::Result<CTxDestination> DescriptorScriptPubKeyMan::GetNewDestination(const OutputType type)
 {
-    // Returns true if this descriptor supports getting new addresses. Conditions where we may be unable to fetch them (e.g. locked) are caught later
-    if (!CanGetAddresses()) {
-        return util::Error{_("No addresses available")};
-    }
     {
         LOCK(cs_desc_man);
         assert(m_wallet_descriptor.descriptor->IsSingleType()); // This is a combo descriptor which should not be an active descriptor
@@ -838,14 +837,18 @@ util::Result<CTxDestination> DescriptorScriptPubKeyMan::GetNewDestination(const 
 
         TopUp();
 
+        // If we exhausted the prefetched pool, try extending it on demand.
+        if (m_wallet_descriptor.next_index >= m_wallet_descriptor.range_end) {
+            if (!TopUp(1) || m_wallet_descriptor.next_index >= m_wallet_descriptor.range_end) {
+                return util::Error{_("No addresses available")};
+            }
+        }
+
         // Get the scriptPubKey from the descriptor
         FlatSigningProvider out_keys;
         std::vector<CScript> scripts_temp;
-        if (m_wallet_descriptor.range_end <= m_max_cached_index && !TopUp(1)) {
-            // We can't generate anymore keys
-            return util::Error{_("Error: Keypool ran out, please call keypoolrefill first")};
-        }
-        if (!m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
+        const bool expanded = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH ? ExpandP2TSHFromCache(m_wallet_descriptor.next_index, scripts_temp, out_keys) : m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, out_keys);
+        if (!expanded) {
             // We can't generate anymore keys
             return util::Error{_("Error: Keypool ran out, please call keypoolrefill first")};
         }
@@ -1002,6 +1005,7 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
 {
     LOCK(cs_desc_man);
     std::set<CScript> new_spks;
+    const bool is_p2tsh = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH;
     unsigned int target_size;
     if (size > 0) {
         target_size = size;
@@ -1012,8 +1016,9 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
     // Calculate the new range_end
     int32_t new_range_end = std::max(m_wallet_descriptor.next_index + (int32_t)target_size, m_wallet_descriptor.range_end);
 
-    // If the descriptor is not ranged, we actually just want to fill the first cache item
-    if (!m_wallet_descriptor.descriptor->IsRange()) {
+    // If the descriptor is not ranged, we actually just want to fill the first cache item,
+    // except for P2TSH where we support indexed derivation using descriptor cache entries.
+    if (!m_wallet_descriptor.descriptor->IsRange() && !is_p2tsh) {
         new_range_end = 1;
         m_wallet_descriptor.range_end = 1;
         m_wallet_descriptor.range_start = 0;
@@ -1027,9 +1032,22 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
         FlatSigningProvider out_keys;
         std::vector<CScript> scripts_temp;
         DescriptorCache temp_cache;
-        // Maybe we have a cached xpub and we can expand from the cache first
-        if (!m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
-            if (!m_wallet_descriptor.descriptor->Expand(i, provider, scripts_temp, out_keys, &temp_cache)) return false;
+        if (is_p2tsh) {
+            if (!ExpandP2TSHFromCache(i, scripts_temp, out_keys)) {
+                if (!HavePrivateKeys() || !m_internal_chain.has_value()) return false;
+                std::vector<unsigned char> mldsa_pubkey;
+                if (!DeriveP2TSHKey(i, *m_internal_chain, mldsa_pubkey)) return false;
+                const CScript leaf_script = CScript() << mldsa_pubkey << OP_CHECKSIG;
+                const uint256 merkle_root = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+                scripts_temp = Vector(GetScriptForDestination(WitnessV2Taproot{merkle_root}));
+                temp_cache.CacheDerivedMLDSAPubKey(i, mldsa_pubkey);
+                out_keys.p2tsh_pubkeys.emplace(merkle_root, std::move(mldsa_pubkey));
+            }
+        } else {
+            // Maybe we have a cached xpub and we can expand from the cache first.
+            if (!m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
+                if (!m_wallet_descriptor.descriptor->Expand(i, provider, scripts_temp, out_keys, &temp_cache)) return false;
+            }
         }
         // Add all of the scriptPubKeys to the scriptPubKey set
         new_spks.insert(scripts_temp.begin(), scripts_temp.end());
@@ -1074,7 +1092,8 @@ std::vector<WalletDestination> DescriptorScriptPubKeyMan::MarkUnusedAddresses(co
             auto out_keys = std::make_unique<FlatSigningProvider>();
             std::vector<CScript> scripts_temp;
             while (index >= m_wallet_descriptor.next_index) {
-                if (!m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, *out_keys)) {
+                const bool expanded = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH ? ExpandP2TSHFromCache(m_wallet_descriptor.next_index, scripts_temp, *out_keys) : m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, *out_keys);
+                if (!expanded) {
                     throw std::runtime_error(std::string(__func__) + ": Unable to expand descriptor from cache");
                 }
                 CTxDestination dest;
@@ -1136,13 +1155,22 @@ bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(WalletBatch& batch, co
 {
     LOCK(cs_desc_man);
     assert(m_storage.IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS));
+    m_internal_chain = internal;
 
     // Ignore when there is already a descriptor
     if (m_wallet_descriptor.descriptor) {
         return false;
     }
 
-    m_wallet_descriptor = GenerateWalletDescriptor(master_key.Neuter(), addr_type, internal);
+    std::optional<std::vector<unsigned char>> mldsa_pubkey;
+    if (addr_type == OutputType::P2TSH) {
+        std::vector<unsigned char> mldsa_seckey;
+        mldsa_pubkey.emplace();
+        if (!DeriveWalletMLDSAKey(master_key.key, internal, /*index=*/0, *mldsa_pubkey, mldsa_seckey)) {
+            throw std::runtime_error(std::string(__func__) + ": failed to derive MLDSA key");
+        }
+    }
+    m_wallet_descriptor = GenerateWalletDescriptor(master_key.Neuter(), addr_type, internal, mldsa_pubkey);
 
     // Store the master private key, and descriptor
     if (!AddDescriptorKeyWithDB(batch, master_key.key, master_key.key.GetPubKey())) {
@@ -1162,17 +1190,55 @@ bool DescriptorScriptPubKeyMan::SetupDescriptorGeneration(WalletBatch& batch, co
 bool DescriptorScriptPubKeyMan::IsHDEnabled() const
 {
     LOCK(cs_desc_man);
-    return m_wallet_descriptor.descriptor->IsRange();
+    return m_wallet_descriptor.descriptor->IsRange() || m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH;
+}
+
+void DescriptorScriptPubKeyMan::SetInternalChain(bool internal)
+{
+    LOCK(cs_desc_man);
+    m_internal_chain = internal;
+}
+
+bool DescriptorScriptPubKeyMan::ExpandP2TSHFromCache(int32_t index, std::vector<CScript>& scripts_temp, FlatSigningProvider& out_keys) const
+{
+    AssertLockHeld(cs_desc_man);
+    std::vector<unsigned char> mldsa_pubkey;
+    if (!m_wallet_descriptor.cache.GetCachedDerivedMLDSAPubKey(index, mldsa_pubkey)) {
+        return false;
+    }
+    const CScript leaf_script = CScript() << mldsa_pubkey << OP_CHECKSIG;
+    const uint256 merkle_root = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+    scripts_temp = Vector(GetScriptForDestination(WitnessV2Taproot{merkle_root}));
+    out_keys.p2tsh_pubkeys.emplace(merkle_root, std::move(mldsa_pubkey));
+    return true;
+}
+
+bool DescriptorScriptPubKeyMan::DeriveP2TSHKey(int32_t index, bool internal, std::vector<unsigned char>& pubkey, std::vector<unsigned char>* seckey) const
+{
+    AssertLockHeld(cs_desc_man);
+    const KeyMap keys = GetKeys();
+    for (const auto& [_, master_key] : keys) {
+        std::vector<unsigned char> derived_pubkey;
+        std::vector<unsigned char> derived_seckey;
+        if (!DeriveWalletMLDSAKey(master_key, internal, index, derived_pubkey, derived_seckey)) {
+            continue;
+        }
+        pubkey = std::move(derived_pubkey);
+        if (seckey) *seckey = std::move(derived_seckey);
+        return true;
+    }
+    return false;
 }
 
 bool DescriptorScriptPubKeyMan::CanGetAddresses(bool internal) const
 {
-    // We can only give out addresses from descriptors that are single type (not combo), ranged,
-    // and either have cached keys or can generate more keys (ignoring encryption)
+    // We can only give out addresses from descriptors that are single type (not combo),
+    // and either have pre-expanded scripts or can derive more entries from private key material.
     LOCK(cs_desc_man);
-    return m_wallet_descriptor.descriptor->IsSingleType() &&
-           m_wallet_descriptor.descriptor->IsRange() &&
-           (HavePrivateKeys() || m_wallet_descriptor.next_index < m_wallet_descriptor.range_end);
+    const bool has_more = m_wallet_descriptor.next_index < m_wallet_descriptor.range_end;
+    const bool is_p2tsh = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH;
+    const bool can_expand = (m_wallet_descriptor.descriptor->IsRange() || is_p2tsh) && HavePrivateKeys();
+    return m_wallet_descriptor.descriptor->IsSingleType() && (has_more || can_expand);
 }
 
 bool DescriptorScriptPubKeyMan::HavePrivateKeys() const
@@ -1245,7 +1311,8 @@ std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvid
     } else {
         // Get the scripts, keys, and key origins for this script
         std::vector<CScript> scripts_temp;
-        if (!m_wallet_descriptor.descriptor->ExpandFromCache(index, m_wallet_descriptor.cache, scripts_temp, *out_keys)) return nullptr;
+        const bool expanded = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH ? ExpandP2TSHFromCache(index, scripts_temp, *out_keys) : m_wallet_descriptor.descriptor->ExpandFromCache(index, m_wallet_descriptor.cache, scripts_temp, *out_keys);
+        if (!expanded) return nullptr;
 
         // Cache SigningProvider so we don't need to re-derive if we need this SigningProvider again
         m_map_signing_providers[index] = *out_keys;
@@ -1254,6 +1321,27 @@ std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvid
     if (HavePrivateKeys() && include_private) {
         FlatSigningProvider master_provider;
         master_provider.keys = GetKeys();
+
+        if (!out_keys->p2tsh_pubkeys.empty()) {
+            std::vector<bool> branches;
+            if (m_internal_chain.has_value()) {
+                branches.push_back(*m_internal_chain);
+            } else {
+                branches = {false, true};
+            }
+            for (bool branch_internal : branches) {
+                std::vector<unsigned char> derived_pubkey;
+                std::vector<unsigned char> derived_seckey;
+                if (!DeriveP2TSHKey(index, branch_internal, derived_pubkey, &derived_seckey)) {
+                    continue;
+                }
+                const uint256 merkle_root = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << derived_pubkey << OP_CHECKSIG);
+                if (out_keys->p2tsh_pubkeys.contains(merkle_root)) {
+                    out_keys->mldsa_keys.emplace(std::move(derived_pubkey), std::move(derived_seckey));
+                }
+            }
+        }
+
         m_wallet_descriptor.descriptor->ExpandPrivate(index, master_provider, *out_keys);
 
         // Always include musig_secnonces as this descriptor may have a participant private key
@@ -1434,7 +1522,8 @@ void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
     for (int32_t i = m_wallet_descriptor.range_start; i < m_wallet_descriptor.range_end; ++i) {
         FlatSigningProvider out_keys;
         std::vector<CScript> scripts_temp;
-        if (!m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
+        const bool expanded = m_wallet_descriptor.descriptor->GetOutputType() == OutputType::P2TSH ? ExpandP2TSHFromCache(i, scripts_temp, out_keys) : m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys);
+        if (!expanded) {
             throw std::runtime_error("Error: Unable to expand wallet descriptor from cache");
         }
         // Add all of the scriptPubKeys to the scriptPubKey set
