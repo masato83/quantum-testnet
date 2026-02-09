@@ -2120,6 +2120,11 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
             return set_error(serror, SCRIPT_ERR_WITNESS_UNEXPECTED);
         }
     }
+    if (flags & SCRIPT_VERIFY_QUANTUM) {
+        // QUANTUM requires WITNESS and TAPROOT
+        assert((flags & SCRIPT_VERIFY_WITNESS) != 0);
+        assert((flags & SCRIPT_VERIFY_TAPROOT) != 0);
+    }
 
     return set_success(serror);
 }

@@ -33,13 +33,17 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
         return "csv";
     case Consensus::DEPLOYMENT_SEGWIT:
         return "segwit";
+    case Consensus::DEPLOYMENT_QUANTUM:
+        return "quantum";
     } // no default case, so the compiler can warn about missing cases
     return "";
 }
 
 std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string_view name)
 {
-    if (name == "segwit") {
+    if (name == "quantum") {
+        return Consensus::BuriedDeployment::DEPLOYMENT_QUANTUM;
+    } else if (name == "segwit") {
         return Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT;
     } else if (name == "bip34") {
         return Consensus::BuriedDeployment::DEPLOYMENT_HEIGHTINCB;

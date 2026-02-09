@@ -2,9 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <test/data/script_tests.json.h>
-#include <test/data/bip341_wallet_vectors.json.h>
-
 #include <common/system.h>
 #include <core_io.h>
 #include <key.h>
@@ -16,24 +13,26 @@
 #include <script/sign.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
+#include <secp256k1.h>
 #include <streams.h>
+#include <test/data/bip341_wallet_vectors.json.h>
+#include <test/data/script_tests.json.h>
 #include <test/util/json.h>
 #include <test/util/random.h>
+#include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <test/util/transaction_utils.h>
+#include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 #include <util/string.h>
+
+#include <boost/test/unit_test.hpp>
 
 #include <cstdint>
 #include <fstream>
 #include <string>
 #include <vector>
-
-#include <boost/test/unit_test.hpp>
-
-#include <secp256k1.h>
-#include <univalue.h>
 
 // Uncomment if you want to output updated JSON tests.
 // #define UPDATE_JSON_TESTS
@@ -141,6 +140,8 @@ void DoTest(const CScript& scriptPubKey, const CScript& scriptSig, const CScript
         // Weed out some invalid flag combinations.
         if (combined_flags & SCRIPT_VERIFY_CLEANSTACK && ~combined_flags & (SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS)) continue;
         if (combined_flags & SCRIPT_VERIFY_WITNESS && ~combined_flags & SCRIPT_VERIFY_P2SH) continue;
+        if (combined_flags & SCRIPT_VERIFY_QUANTUM && ~combined_flags & SCRIPT_VERIFY_WITNESS) continue;
+        if (combined_flags & SCRIPT_VERIFY_QUANTUM && ~combined_flags & SCRIPT_VERIFY_TAPROOT) continue;
         BOOST_CHECK_MESSAGE(VerifyScript(scriptSig, scriptPubKey, &scriptWitness, combined_flags, MutableTransactionSignatureChecker(&tx, 0, txCredit.vout[0].nValue, MissingDataBehavior::ASSERT_FAIL), &err) == expect, message + strprintf(" (with flags %x)", combined_flags.as_int()));
     }
 }

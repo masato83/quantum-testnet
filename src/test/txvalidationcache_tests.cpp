@@ -5,6 +5,7 @@
 #include <consensus/validation.h>
 #include <key.h>
 #include <random.h>
+#include <script/interpreter.h>
 #include <script/sigcache.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
@@ -137,6 +138,11 @@ static void ValidateCheckInputsForAllFlags(const CTransaction &tx, script_verify
             // CLEANSTACK requires P2SH and WITNESS, see VerifyScript() in
             // script/interpreter.cpp
             test_flags |= SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS;
+        }
+        if ((test_flags & SCRIPT_VERIFY_QUANTUM)) {
+            // QUANTUM requires WITNESS and TAPROOT
+            test_flags |= SCRIPT_VERIFY_WITNESS;
+            test_flags |= SCRIPT_VERIFY_TAPROOT;
         }
         if ((test_flags & SCRIPT_VERIFY_WITNESS)) {
             // WITNESS requires P2SH

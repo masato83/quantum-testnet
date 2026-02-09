@@ -2284,6 +2284,11 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_NULLDUMMY;
     }
 
+    // Verify quantum scripts
+    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_QUANTUM)) {
+        flags |= SCRIPT_VERIFY_QUANTUM;
+    }
+
     return flags;
 }
 

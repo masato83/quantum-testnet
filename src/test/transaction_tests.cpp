@@ -115,6 +115,7 @@ bool CheckTxScripts(const CTransaction& tx, const std::map<COutPoint, CScript>& 
  * Trim or fill flags to make the combination valid:
  * WITNESS must be used with P2SH
  * CLEANSTACK must be used WITNESS and P2SH
+ * QUANTUM must be used with WITNESS
  */
 
 script_verify_flags TrimFlags(script_verify_flags flags)
@@ -124,6 +125,11 @@ script_verify_flags TrimFlags(script_verify_flags flags)
 
     // CLEANSTACK requires WITNESS (and transitively CLEANSTACK requires P2SH)
     if (!(flags & SCRIPT_VERIFY_WITNESS)) flags &= ~SCRIPT_VERIFY_CLEANSTACK;
+
+    // QUANTUM requires WITNESS and TAPROOT
+    if (!(flags & SCRIPT_VERIFY_WITNESS)) flags &= ~SCRIPT_VERIFY_QUANTUM;
+    if (!(flags & SCRIPT_VERIFY_TAPROOT)) flags &= ~SCRIPT_VERIFY_QUANTUM;
+
     Assert(IsValidFlagCombination(flags));
     return flags;
 }
@@ -132,6 +138,10 @@ script_verify_flags FillFlags(script_verify_flags flags)
 {
     // CLEANSTACK implies WITNESS
     if (flags & SCRIPT_VERIFY_CLEANSTACK) flags |= SCRIPT_VERIFY_WITNESS;
+
+    // QUANTUM implies WITNESS and TAPROOT
+    if (flags & SCRIPT_VERIFY_QUANTUM) flags |= SCRIPT_VERIFY_WITNESS;
+    if (flags & SCRIPT_VERIFY_QUANTUM) flags |= SCRIPT_VERIFY_TAPROOT;
 
     // WITNESS implies P2SH (and transitively CLEANSTACK implies P2SH)
     if (flags & SCRIPT_VERIFY_WITNESS) flags |= SCRIPT_VERIFY_P2SH;

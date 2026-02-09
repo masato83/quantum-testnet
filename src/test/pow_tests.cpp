@@ -11,6 +11,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <limits>
+
 BOOST_FIXTURE_TEST_SUITE(pow_tests, BasicTestingSetup)
 
 /* Test calculation of next difficulty target with no constraints applying */
@@ -181,6 +183,9 @@ void sanity_check_chainparams(const ArgsManager& args, ChainType chain_type)
         targ_max /= consensus.nPowTargetTimespan*4;
         BOOST_CHECK(UintToArith256(consensus.powLimit) < targ_max);
     }
+
+    // for now, quantum verification should either be always on (testnet3, regtest) or always off (main, testnet4, signet)
+    BOOST_CHECK(consensus.QuantumHeight == 0 || consensus.QuantumHeight == std::numeric_limits<int>::max());
 }
 
 BOOST_AUTO_TEST_CASE(ChainParams_MAIN_sanity)
