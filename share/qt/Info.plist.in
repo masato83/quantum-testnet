@@ -43,7 +43,7 @@
   <true/>
 
   <key>CFBundleIdentifier</key>
-  <string>org.bitcoinfoundation.Bitcoin-Qt</string>
+  <string>org.quantum-testnet.quantum-testnet-Qt</string>
 
   <key>CFBundleURLTypes</key>
   <array>
