@@ -4,6 +4,7 @@
 
 #include <common/system.h>
 #include <core_io.h>
+#include <crypto/mldsa.h>
 #include <key.h>
 #include <rpc/util.h>
 #include <script/interpreter.h>
@@ -1892,6 +1893,78 @@ BOOST_AUTO_TEST_CASE(max_element_size)
             SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT,
             SCRIPT_ERR_OK,
             /*expect_valid=*/true);
+}
+
+BOOST_AUTO_TEST_CASE(mldsa_tapscript)
+{
+    // MLDSA-87 (NIST level 5) signature verification in P2TSH.
+    const CAmount amount{1000};
+    std::array<unsigned char, mldsa::MLDSA_SEED_SIZE> seed{};
+    seed.fill(0x01);
+    std::array<unsigned char, mldsa::MLDSA87_PUBLICKEY_SIZE> pk{};
+    std::array<unsigned char, mldsa::MLDSA87_SECRETKEY_SIZE> sk{};
+    BOOST_REQUIRE(mldsa::KeypairFromSeed(seed, pk, sk));
+
+    const CScript script = CScript() << std::vector<unsigned char>(pk.begin(), pk.end()) << OP_CHECKSIG;
+    const uint256 tapleaf_hash = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, std::span<const unsigned char>{script});
+    const CScript script_pubkey = CScript() << OP_2 << ToByteVector(tapleaf_hash);
+    const std::vector<unsigned char> control{0xc1};
+
+    CMutableTransaction tx_credit = BuildCreditingTransaction(script_pubkey, amount);
+    CMutableTransaction tx_spend = BuildSpendingTransaction(CScript(), CScriptWitness(), CTransaction(tx_credit));
+    const CTransaction tx_spend_const{tx_spend};
+
+    PrecomputedTransactionData txdata;
+    txdata.Init(tx_spend_const, std::vector<CTxOut>{tx_credit.vout[0]}, true);
+
+    ScriptExecutionData execdata;
+    execdata.m_annex_init = true;
+    execdata.m_annex_present = false;
+    execdata.m_tapleaf_hash = tapleaf_hash;
+    execdata.m_tapleaf_hash_init = true;
+    execdata.m_codeseparator_pos = 0xFFFFFFFF;
+    execdata.m_codeseparator_pos_init = true;
+
+    uint256 sighash;
+    BOOST_REQUIRE(SignatureHashSchnorr(sighash, execdata, tx_spend_const, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL));
+
+    std::array<unsigned char, mldsa::MLDSA87_SIGNATURE_SIZE> sig{};
+    const std::span<const unsigned char> msg{sighash.begin(), uint256::size()};
+    BOOST_REQUIRE(mldsa::SignDeterministic(msg, {}, sk, sig));
+
+    auto RunCase = [&](const std::string& name, const std::vector<unsigned char>& sig_in, ScriptError_t expected_error, bool expect_valid) {
+        CScriptWitness witness;
+        witness.stack.push_back(sig_in);
+        witness.stack.push_back(ToByteVector(script));
+        witness.stack.push_back(control);
+        tx_spend.vin[0].scriptWitness = witness;
+
+        ScriptError err = SCRIPT_ERR_UNKNOWN_ERROR;
+        const bool ok = VerifyScript(tx_spend.vin[0].scriptSig, tx_credit.vout[0].scriptPubKey, &tx_spend.vin[0].scriptWitness,
+                                     SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+                                     TransactionSignatureChecker(&tx_spend_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL),
+                                     &err);
+        BOOST_CHECK_MESSAGE(ok == expect_valid, name);
+        BOOST_CHECK_MESSAGE(err == expected_error, name << " (got " << ScriptErrorString(err) << ")");
+    };
+
+    const std::vector<unsigned char> sig_ok(sig.begin(), sig.end());
+    RunCase("mldsa tapscript ok", sig_ok, SCRIPT_ERR_OK, /*expect_valid=*/true);
+
+    // Wrong size.
+    std::vector<unsigned char> sig_bad_size = sig_ok;
+    sig_bad_size.pop_back();
+    RunCase("mldsa tapscript wrong size", sig_bad_size, SCRIPT_ERR_SCHNORR_SIG_SIZE, /*expect_valid=*/false);
+
+    // Invalid hashtype.
+    std::vector<unsigned char> sig_bad_hashtype = sig_ok;
+    sig_bad_hashtype.push_back(0x04);
+    RunCase("mldsa tapscript invalid hashtype", sig_bad_hashtype, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE, /*expect_valid=*/false);
+
+    // Wrong signature (flip first byte).
+    std::vector<unsigned char> sig_bad = sig_ok;
+    sig_bad[0] ^= 0x01;
+    RunCase("mldsa tapscript wrong signature", sig_bad, SCRIPT_ERR_SCHNORR_SIG, /*expect_valid=*/false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

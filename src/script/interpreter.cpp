@@ -5,6 +5,7 @@
 
 #include <script/interpreter.h>
 
+#include <crypto/mldsa.h>
 #include <crypto/ripemd160.h>
 #include <crypto/sha1.h>
 #include <crypto/sha256.h>
@@ -368,6 +369,10 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
         return set_error(serror, SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY);
     } else if (pubkey.size() == 32) {
         if (success && !checker.CheckSchnorrSignature(sig, pubkey, sigversion, execdata, serror)) {
+            return false; // serror is set
+        }
+    } else if (pubkey.size() == mldsa::MLDSA87_PUBLICKEY_SIZE && (flags & SCRIPT_VERIFY_QUANTUM)) {
+        if (success && !checker.CheckMLDSASignature(sig, pubkey, sigversion, execdata, serror)) {
             return false; // serror is set
         }
     } else {
@@ -1693,6 +1698,13 @@ bool GenericTransactionSignatureChecker<T>::VerifySchnorrSignature(std::span<con
 }
 
 template <class T>
+bool GenericTransactionSignatureChecker<T>::VerifyMLDSASignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, const uint256& sighash) const
+{
+    const std::span<const unsigned char> msg{sighash.begin(), uint256::size()};
+    return mldsa::Verify(sig, msg, {}, pubkey);
+}
+
+template <class T>
 bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const
 {
     CPubKey pubkey(vchPubKey);
@@ -1742,6 +1754,29 @@ bool GenericTransactionSignatureChecker<T>::CheckSchnorrSignature(std::span<cons
         return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
     }
     if (!VerifySchnorrSignature(sig, pubkey, sighash)) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG);
+    return true;
+}
+
+template <class T>
+bool GenericTransactionSignatureChecker<T>::CheckMLDSASignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey_in, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror) const
+{
+    assert(sigversion == SigVersion::TAPSCRIPT);
+    if (pubkey_in.size() != mldsa::MLDSA87_PUBLICKEY_SIZE) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
+    if (sig.size() != mldsa::MLDSA87_SIGNATURE_SIZE && sig.size() != mldsa::MLDSA87_SIGNATURE_SIZE + 1) {
+        return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
+    }
+
+    uint8_t hashtype = SIGHASH_DEFAULT;
+    if (sig.size() == mldsa::MLDSA87_SIGNATURE_SIZE + 1) {
+        hashtype = SpanPopBack(sig);
+        if (hashtype == SIGHASH_DEFAULT) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
+    }
+    uint256 sighash;
+    if (!this->txdata) return HandleMissingData(m_mdb);
+    if (!SignatureHashSchnorr(sighash, execdata, *txTo, nIn, hashtype, sigversion, *this->txdata, m_mdb)) {
+        return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
+    }
+    if (!VerifyMLDSASignature(sig, pubkey_in, sighash)) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG);
     return true;
 }
 
