@@ -24,8 +24,11 @@
 #include <utility>
 #include <vector>
 
-// Maximum number of bytes pushable to the stack
+// Maximum number of bytes pushable to the stack for legacy scripts (non-P2TSH witness).
 static const unsigned int MAX_SCRIPT_ELEMENT_SIZE = 520;
+
+// Maximum number of bytes pushable to the stack for P2TSH scripts.
+static const unsigned int MAX_SCRIPT_ELEMENT_SIZE_TAPROOT_P2TSH = 15000;
 
 // Maximum number of non-push operations per script
 static const int MAX_OPS_PER_SCRIPT = 201;

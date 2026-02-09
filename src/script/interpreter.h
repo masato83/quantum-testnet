@@ -9,6 +9,7 @@
 #include <consensus/amount.h>
 #include <hash.h>
 #include <primitives/transaction.h>
+#include <script/script.h>
 #include <script/script_error.h> // IWYU pragma: export
 #include <script/verify_flags.h> // IWYU pragma: export
 #include <span.h>
@@ -234,6 +235,9 @@ struct ScriptExecutionData
 
     //! The hash of the corresponding output
     std::optional<uint256> m_output_hash;
+
+    //! Maximum number of bytes pushable to the stack
+    unsigned int m_max_script_element_size = MAX_SCRIPT_ELEMENT_SIZE;
 };
 
 /** Signature hash sizes */

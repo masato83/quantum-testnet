@@ -444,7 +444,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
             //
             if (!script.GetOp(pc, opcode, vchPushValue))
                 return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
-            if (vchPushValue.size() > MAX_SCRIPT_ELEMENT_SIZE)
+            if (vchPushValue.size() > execdata.m_max_script_element_size)
                 return set_error(serror, SCRIPT_ERR_PUSH_SIZE);
 
             if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
@@ -1859,9 +1859,9 @@ static bool ExecuteWitnessScript(const std::span<const valtype>& stack_span, con
         if (stack.size() > MAX_STACK_SIZE) return set_error(serror, SCRIPT_ERR_STACK_SIZE);
     }
 
-    // Disallow stack item size > MAX_SCRIPT_ELEMENT_SIZE in witness stack
+    // Disallow stack item size > execdata.m_max_script_element_size in witness stack
     for (const valtype& elem : stack) {
-        if (elem.size() > MAX_SCRIPT_ELEMENT_SIZE) return set_error(serror, SCRIPT_ERR_PUSH_SIZE);
+        if (elem.size() > execdata.m_max_script_element_size) return set_error(serror, SCRIPT_ERR_PUSH_SIZE);
     }
 
     // Run the script interpreter.
@@ -2024,10 +2024,12 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
                 if (!VerifyTaprootCommitment(control, program, execdata.m_tapleaf_hash)) {
                     return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
                 }
+                execdata.m_max_script_element_size = MAX_SCRIPT_ELEMENT_SIZE;
             } else {
                 if (!VerifyTaprootP2TSHCommitment(control, program, execdata.m_tapleaf_hash)) {
                     return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
                 }
+                execdata.m_max_script_element_size = MAX_SCRIPT_ELEMENT_SIZE_TAPROOT_P2TSH;
             }
             execdata.m_tapleaf_hash_init = true;
             if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {

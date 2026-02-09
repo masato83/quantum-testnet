@@ -1810,4 +1810,88 @@ BOOST_AUTO_TEST_CASE(p2tsh)
             /*expect_valid=*/true);
 }
 
+BOOST_AUTO_TEST_CASE(max_element_size)
+{
+    const CAmount amount{1000};
+    const std::vector<unsigned char> big(MAX_SCRIPT_ELEMENT_SIZE_TAPROOT_P2TSH, 0x01);
+    const CScript script = CScript() << big << OP_DROP << OP_DROP << OP_1;
+
+    auto RunCase = [&](const std::string& name, const CScript& script_pubkey,
+                       const std::vector<std::vector<unsigned char>>& witness_stack,
+                       script_verify_flags flags, ScriptError_t expected_error, bool expect_valid) {
+        CMutableTransaction tx_credit = BuildCreditingTransaction(script_pubkey, amount);
+        CScriptWitness witness;
+        witness.stack = witness_stack;
+        CMutableTransaction tx_spend = BuildSpendingTransaction(CScript(), witness, CTransaction(tx_credit));
+        const CTransaction tx_spend_const{tx_spend};
+        PrecomputedTransactionData txdata{tx_spend_const};
+        ScriptError err{SCRIPT_ERR_UNKNOWN_ERROR};
+        const bool ok = VerifyScript(tx_spend_const.vin[0].scriptSig,
+                                     tx_credit.vout[0].scriptPubKey,
+                                     &tx_spend_const.vin[0].scriptWitness,
+                                     flags,
+                                     TransactionSignatureChecker(&tx_spend_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL),
+                                     &err);
+        BOOST_CHECK_MESSAGE(ok == expect_valid, name);
+        BOOST_CHECK_MESSAGE(err == expected_error, name << " (got " << ScriptErrorString(err) << ")");
+    };
+
+    // P2TSH: program is the tapleaf hash, control is 1 byte with parity bit set.
+    const uint256 v2_program = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, std::span<const unsigned char>{script});
+    const CScript v2_script_pubkey = CScript() << OP_2 << ToByteVector(v2_program);
+    RunCase("P2TSH v2 allows 15k witness/script element",
+            v2_script_pubkey,
+            /*witness_stack=*/{big, ToByteVector(script), std::vector<unsigned char>{0xc1}},
+            SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_QUANTUM,
+            SCRIPT_ERR_OK,
+            /*expect_valid=*/true);
+
+    // P2TRv1: build a valid taproot output and control block for the same script.
+    TaprootBuilder builder;
+    builder.Add(/*depth=*/0, ToByteVector(script), TAPROOT_LEAF_TAPSCRIPT, /*track=*/true);
+    builder.Finalize(XOnlyPubKey::NUMS_H);
+    auto controlblocks = builder.GetSpendData().scripts[{ToByteVector(script), TAPROOT_LEAF_TAPSCRIPT}];
+    const std::vector<unsigned char> v1_control = *(controlblocks.begin());
+    const CScript v1_script_pubkey = CScript() << OP_1 << ToByteVector(builder.GetOutput());
+
+    // P2TRv1: reject 15k witness element (stack item size check).
+    const CScript script_small = CScript() << OP_1;
+    TaprootBuilder builder_small;
+    builder_small.Add(/*depth=*/0, ToByteVector(script_small), TAPROOT_LEAF_TAPSCRIPT, /*track=*/true);
+    builder_small.Finalize(XOnlyPubKey::NUMS_H);
+    auto controlblocks_small = builder_small.GetSpendData().scripts[{ToByteVector(script_small), TAPROOT_LEAF_TAPSCRIPT}];
+    const std::vector<unsigned char> v1_control_small = *(controlblocks_small.begin());
+    const CScript v1_script_pubkey_small = CScript() << OP_1 << ToByteVector(builder_small.GetOutput());
+    RunCase("P2TR v1 rejects 15k witness element",
+            v1_script_pubkey_small,
+            /*witness_stack=*/{big, ToByteVector(script_small), v1_control_small},
+            SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT,
+            SCRIPT_ERR_PUSH_SIZE,
+            /*expect_valid=*/false);
+
+    // P2TRv1: reject 15k script element (script push size check).
+    RunCase("P2TR v1 rejects 15k script element",
+            v1_script_pubkey,
+            /*witness_stack=*/{ToByteVector(script), v1_control},
+            SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT,
+            SCRIPT_ERR_PUSH_SIZE,
+            /*expect_valid=*/false);
+
+    // P2TRv1: allow 520-byte witness element and script element.
+    const std::vector<unsigned char> max520(MAX_SCRIPT_ELEMENT_SIZE, 0x01);
+    const CScript script_520 = CScript() << max520 << OP_DROP << OP_DROP << OP_1;
+    TaprootBuilder builder_520;
+    builder_520.Add(/*depth=*/0, ToByteVector(script_520), TAPROOT_LEAF_TAPSCRIPT, /*track=*/true);
+    builder_520.Finalize(XOnlyPubKey::NUMS_H);
+    auto controlblocks_520 = builder_520.GetSpendData().scripts[{ToByteVector(script_520), TAPROOT_LEAF_TAPSCRIPT}];
+    const std::vector<unsigned char> v1_control_520 = *(controlblocks_520.begin());
+    const CScript v1_script_pubkey_520 = CScript() << OP_1 << ToByteVector(builder_520.GetOutput());
+    RunCase("P2TR v1 allows 520 witness/script element",
+            v1_script_pubkey_520,
+            /*witness_stack=*/{max520, ToByteVector(script_520), v1_control_520},
+            SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT,
+            SCRIPT_ERR_OK,
+            /*expect_valid=*/true);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
