@@ -452,8 +452,8 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
     }
 
     // Tx spending TRUC cannot have too many sigops.
-    // This child has 10 P2WSH multisig inputs.
-    auto multisig_outpoints{random_outpoints(10)};
+    // This child has 40 P2WSH multisig inputs (plus one inherited parent outpoint).
+    auto multisig_outpoints{random_outpoints(40)};
     multisig_outpoints.emplace_back(mempool_tx_v3->GetHash(), 0);
     auto keys{random_keys(2)};
     CScript script_multisig;
@@ -479,20 +479,23 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         const int64_t total_sigops{static_cast<int64_t>(tx_many_sigops->vin.size()) * static_cast<int64_t>(script_multisig.GetSigOpCount(/*fAccurate=*/false))};
         BOOST_CHECK_EQUAL(total_sigops, tx_many_sigops->vin.size() * MAX_PUBKEYS_PER_MULTISIG);
         const int64_t bip141_vsize{GetVirtualTransactionSize(*tx_many_sigops)};
-        // Weight limit is not reached...
-        BOOST_CHECK(SingleTRUCChecks(pool, tx_many_sigops, parents, empty_conflicts_set, bip141_vsize) == std::nullopt);
-        // ...but sigop limit is.
+        const int64_t sigop_vsize{total_sigops * DEFAULT_BYTES_PER_SIGOP / WITNESS_SCALE_FACTOR};
+        const int64_t expected_vsize{std::max(bip141_vsize, sigop_vsize)};
+        // The child is too large once sigop-adjusted virtual size is taken into account.
         const auto expected_error_str{strprintf("version=3 child tx %s (wtxid=%s) is too big: %u > %u virtual bytes",
-            tx_many_sigops->GetHash().ToString(), tx_many_sigops->GetWitnessHash().ToString(),
-            total_sigops * DEFAULT_BYTES_PER_SIGOP / WITNESS_SCALE_FACTOR, TRUC_CHILD_MAX_VSIZE)};
-        auto result{SingleTRUCChecks(pool, tx_many_sigops, parents, empty_conflicts_set,
-                                        GetVirtualTransactionSize(*tx_many_sigops, /*nSigOpCost=*/total_sigops, /*bytes_per_sigop=*/ DEFAULT_BYTES_PER_SIGOP))};
+                                                tx_many_sigops->GetHash().ToString(), tx_many_sigops->GetWitnessHash().ToString(),
+                                                expected_vsize, TRUC_CHILD_MAX_VSIZE)};
+        const auto expected_package_error_str{strprintf("version=3 child tx %s (wtxid=%s) is too big: %u > %u virtual bytes",
+                                                        tx_many_sigops->GetHash().ToString(), tx_many_sigops->GetWitnessHash().ToString(),
+                                                        sigop_vsize, TRUC_CHILD_MAX_VSIZE)};
+        auto result{SingleTRUCChecks(pool, tx_many_sigops, parents, empty_conflicts_set, bip141_vsize)};
+        BOOST_REQUIRE(result);
         BOOST_CHECK_EQUAL(result->first, expected_error_str);
         BOOST_CHECK_EQUAL(result->second, nullptr);
 
         Package package_child_sigops{mempool_tx_v3, tx_many_sigops};
-        BOOST_CHECK_EQUAL(*PackageTRUCChecks(pool, tx_many_sigops, total_sigops * DEFAULT_BYTES_PER_SIGOP / WITNESS_SCALE_FACTOR, package_child_sigops, empty_parents),
-                          expected_error_str);
+        BOOST_CHECK_EQUAL(*PackageTRUCChecks(pool, tx_many_sigops, sigop_vsize, package_child_sigops, empty_parents),
+                          expected_package_error_str);
     }
 
     // Parent + child with TRUC in the mempool. Child is allowed as long as it is under TRUC_CHILD_MAX_VSIZE.

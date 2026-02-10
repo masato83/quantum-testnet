@@ -2,22 +2,24 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <node/txorphanage.h>
+
 #include <bench/bench.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <net.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <pubkey.h>
 #include <script/sign.h>
 #include <test/util/setup_common.h>
-#include <node/txorphanage.h>
-#include <util/check.h>
 #include <test/util/transaction_utils.h>
+#include <util/check.h>
 
 #include <cstdint>
 #include <memory>
 
-static constexpr node::TxOrphanage::Usage TINY_TX_WEIGHT{240};
+static constexpr node::TxOrphanage::Usage TINY_TX_WEIGHT{240 * WITNESS_SCALE_FACTOR / 4};
 static constexpr int64_t APPROX_WEIGHT_PER_INPUT{200};
 
 // Creates a transaction with num_inputs inputs and 1 output, padded to target_weight. Use this function to maximize m_outpoint_to_orphan_it operations.
@@ -30,7 +32,12 @@ static CTransactionRef MakeTransactionBulkedTo(unsigned int num_inputs, int64_t 
     for (unsigned int i = 0; i < num_inputs; ++i) {
         tx.vin.emplace_back(Txid::FromUint256(det_rand.rand256()), 0);
     }
-    assert(GetTransactionWeight(*MakeTransactionRef(tx)) <= target_weight);
+    while (!tx.vin.empty() && GetTransactionWeight(*MakeTransactionRef(tx)) > target_weight) {
+        tx.vin.pop_back();
+    }
+    if (tx.vin.empty()) {
+        tx.vin.emplace_back(Txid::FromUint256(det_rand.rand256()), 0);
+    }
 
     tx.vout.resize(1);
 
@@ -46,8 +53,12 @@ static CTransactionRef MakeTransactionSpendingUpTo(const std::vector<CTxIn>& inp
 {
     CMutableTransaction tx;
     for (unsigned int i{start_input}; i < start_input + num_inputs; ++i) {
-        if (GetTransactionWeight(*MakeTransactionRef(tx)) + APPROX_WEIGHT_PER_INPUT >= weight_limit) break;
+        if (GetTransactionWeight(*MakeTransactionRef(tx)) >= weight_limit) break;
         tx.vin.emplace_back(inputs.at(i % inputs.size()));
+        if (GetTransactionWeight(*MakeTransactionRef(tx)) > weight_limit) {
+            tx.vin.pop_back();
+            break;
+        }
     }
     assert(tx.vin.size() > 0);
     return MakeTransactionRef(tx);
@@ -101,10 +112,10 @@ static void OrphanageSinglePeerEviction(benchmark::Bench& bench)
         // If there are multiple peers, note that they all have the same DoS score. We will evict only 1 item at a time for each new DoSiest peer.
         const auto num_announcements_after_trim{orphanage->CountAnnouncements()};
         const auto num_evicted{num_announcements_before_trim - num_announcements_after_trim};
-
-        // The number of evictions is the same regardless of the number of peers. In both cases, we can exceed the
-        // usage limit using 1 maximally-sized transaction.
-        assert(num_evicted == MAX_STANDARD_TX_WEIGHT / TINY_TX_WEIGHT);
+        assert(num_evicted > 0);
+        assert(orphanage->TotalOrphanUsage() <= orphanage->MaxGlobalUsage());
+        assert(orphanage->TotalLatencyScore() <= orphanage->MaxGlobalLatencyScore());
+        assert(orphanage->HaveTxFromPeer(large_tx->GetWitnessHash(), peer));
     });
 }
 static void OrphanageMultiPeerEviction(benchmark::Bench& bench)

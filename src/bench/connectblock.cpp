@@ -4,6 +4,7 @@
 
 #include <addresstype.h>
 #include <bench/bench.h>
+#include <consensus/consensus.h>
 #include <interfaces/chain.h>
 #include <kernel/cs_main.h>
 #include <script/interpreter.h>
@@ -91,7 +92,10 @@ std::pair<std::vector<CKey>, std::vector<CTxOut>> CreateKeysAndOutputs(const CKe
 
 void BenchmarkConnectBlock(benchmark::Bench& bench, std::vector<CKey>& keys, std::vector<CTxOut>& outputs, TestChain100Setup& test_setup)
 {
-    const auto& test_block{CreateTestBlock(test_setup, keys, outputs)};
+    // Keep benchmark blocks valid across witness scaling choices.
+    int num_txs = 1000 * 4 / WITNESS_SCALE_FACTOR;
+    if (num_txs < 1) num_txs = 1;
+    const auto& test_block{CreateTestBlock(test_setup, keys, outputs, num_txs)};
     bench.unit("block").run([&] {
         LOCK(cs_main);
         auto& chainman{test_setup.m_node.chainman};

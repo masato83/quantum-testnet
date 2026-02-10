@@ -238,9 +238,9 @@ void MockMempoolMinFee(const CFeeRate& target_feerate, CTxMemPool& mempool)
     CMutableTransaction mtx{};
     mtx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{123}), 0});
     mtx.vout.emplace_back(1 * COIN, GetScriptForDestination(WitnessV0ScriptHash(CScript() << OP_TRUE)));
-    // Set a large size so that the fee evaluated at target_feerate (which is usually in sats/kvB) is an integer.
-    // Otherwise, GetMinFee() may end up slightly different from target_feerate.
-    BulkTransaction(mtx, 4000);
+    // Keep virtual size around 1000 vB so sat/kvB feerates can be represented exactly.
+    // Under WITNESS_SCALE_FACTOR=16, 4000 WU would only be ~250 vB.
+    BulkTransaction(mtx, 1000 * WITNESS_SCALE_FACTOR);
     const auto tx{MakeTransactionRef(mtx)};
     LockPoints lp;
     // The new mempool min feerate is equal to the removed package's feerate + incremental feerate.

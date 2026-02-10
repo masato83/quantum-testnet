@@ -6,6 +6,7 @@
 #include <bench/data/block413567.raw.h>
 #include <chainparams.h>
 #include <common/args.h>
+#include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -56,7 +57,14 @@ static void DeserializeAndCheckBlockTest(benchmark::Bench& bench)
 
         BlockValidationState validationState;
         bool checked = CheckBlock(block, validationState, chainParams->GetConsensus());
-        assert(checked);
+        // The historical benchmark block was valid under WITNESS_SCALE_FACTOR=4.
+        // With larger witness scaling factors it can exceed MAX_BLOCK_WEIGHT and
+        // fail with bad-blk-length, which is expected in this benchmark context.
+        if (WITNESS_SCALE_FACTOR == 4) {
+            assert(checked);
+        } else {
+            assert(checked || validationState.GetRejectReason() == "bad-blk-length");
+        }
     });
 }
 

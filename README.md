@@ -4,7 +4,7 @@ Post-quantum Bitcoin testnet fork
 [![CI](https://github.com/masato83/quantum-testnet/actions/workflows/ci.yml/badge.svg)](https://github.com/masato83/quantum-testnet/actions/workflows/ci.yml)
 
 This is a hard fork of Bitcoin testnet3 with a limited set of changes to support post-quantum signatures with reasonable throughput:
-- 30-second block time (block size unchanged)
+- 30-second block time (block size unchanged), witness scale factor of 16
 - P2TSH outputs (Taproot outputs without key-path spends, BIP360)
 - 15,000-byte element size limit within P2TSH
 - ML-DSA-87 signature verification within P2TSH (NIST L5)
@@ -12,7 +12,9 @@ This is a hard fork of Bitcoin testnet3 with a limited set of changes to support
 
 There are no additional opcodes - `EvalChecksigTapscript` applies ML-DSA depending on pubkey size, so `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` support ML-DSA signatures in P2TSH. Non-P2TSH script evaluation is unchanged.
 
-Build instructions: `doc/build-*`. Everything should build on all platforms (including GUI) and all unit tests should pass.
+Build instructions: `doc/build-*`. Everything should build on all platforms (including GUI).
+
+Unit tests were added and updated to cover the changes above. Functional tests that are currently incompatible with those changes were temporarily disabled to keep the commits focused and small.
 
 Bitcoin Core integration/staging tree
 =====================================

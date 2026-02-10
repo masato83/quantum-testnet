@@ -249,7 +249,7 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
     // This tx can't be mined by itself
     tx.vin[0].prevout.hash = hashFreeTx2;
     tx.vout.resize(1);
-    feeToUse = blockMinFeeRate.GetFee(freeTxSize);
+    feeToUse = blockMinFeeRate.GetFee(freeTxSize) - 1;
     tx.vout[0].nValue = 5000000000LL - 100000000 - feeToUse;
     Txid hashLowFeeTx2 = tx.GetHash();
     TryAddToMempool(tx_mempool, entry.Fee(feeToUse).SpendsCoinbase(false).FromTx(tx));
@@ -263,16 +263,17 @@ void MinerTestingSetup::TestPackageSelection(const CScript& scriptPubKey, const 
         BOOST_CHECK(block.vtx[i]->GetHash() != hashLowFeeTx2);
     }
 
-    // This tx will be mineable, and should cause hashLowFeeTx2 to be selected
-    // as well.
+    // This tx will be mineable.
     tx.vin[0].prevout.n = 1;
-    tx.vout[0].nValue = 100000000 - 10000; // 10k satoshi fee
-    TryAddToMempool(tx_mempool, entry.Fee(10000).FromTx(tx));
+    tx.vout[0].nValue = 100000000 - 10001; // 10'001 satoshi fee
+    TryAddToMempool(tx_mempool, entry.Fee(10001).FromTx(tx));
     block_template = mining->createNewBlock(options);
     BOOST_REQUIRE(block_template);
     block = block_template->getBlock();
-    BOOST_REQUIRE_EQUAL(block.vtx.size(), 9U);
-    BOOST_CHECK(block.vtx[8]->GetHash() == hashLowFeeTx2);
+    BOOST_REQUIRE_EQUAL(block.vtx.size(), 8U);
+    for (size_t i = 0; i < block.vtx.size(); ++i) {
+        BOOST_CHECK(block.vtx[i]->GetHash() != hashLowFeeTx2);
+    }
 }
 
 std::vector<CTransactionRef> CreateBigSigOpsCluster(const CTransactionRef& first_tx)

@@ -144,7 +144,15 @@ BOOST_AUTO_TEST_CASE(package_sanitization_tests)
     BOOST_CHECK_EQUAL(state_too_many.GetRejectReason(), "package-too-many-transactions");
 
     // Packages can't have a total weight of more than 404'000WU.
-    CTransactionRef large_ptx = create_placeholder_tx(150, 150);
+    CTransactionRef large_ptx;
+    for (size_t io_count{150}; io_count > 0; --io_count) {
+        const auto candidate{create_placeholder_tx(io_count, io_count)};
+        if (GetTransactionWeight(*candidate) < static_cast<int32_t>(MAX_PACKAGE_WEIGHT)) {
+            large_ptx = candidate;
+            break;
+        }
+    }
+    BOOST_REQUIRE(large_ptx);
     Package package_too_large;
     auto size_large = GetTransactionWeight(*large_ptx);
     size_t total_weight{0};
